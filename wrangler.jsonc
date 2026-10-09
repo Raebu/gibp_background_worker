@@ -30,7 +30,7 @@
     {
       "binding": "GROWTH_DB",
       "database_name": "gibp-growth",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "89e36512-deda-42a0-ad8f-5f0926b750ba",
       "migrations_dir": "migrations"
     }
   ],
