@@ -515,6 +515,31 @@ export async function handleResendEvent(env: Env, event: any) {
     return handleInboundEmail(env, data.email_id)
   }
 
+  if (type === "suppression.added") {
+    const suppressedEmail = String(data.email || data.recipient || "").trim().toLowerCase()
+    if (suppressedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppressedEmail)) {
+      await env.GROWTH_DB.prepare(
+        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,?,?)",
+      )
+        .bind(
+          suppressedEmail,
+          String(data.reason || "suppression.added"),
+          "resend_webhook",
+          nowIso(),
+        )
+        .run()
+      await env.GROWTH_DB.prepare(
+        "UPDATE contacts SET status='suppressed', updated_at=? WHERE lower(email)=lower(?)",
+      )
+        .bind(nowIso(), suppressedEmail)
+        .run()
+      await audit(env, "compliance", "provider_suppression", "contact", suppressedEmail, {
+        reason: data.reason || null,
+      })
+      return { handled: true, suppression: true }
+    }
+  }
+
   const providerId = data.email_id
   if (!providerId) return { ignored: true }
 
@@ -540,7 +565,11 @@ export async function handleResendEvent(env: Env, event: any) {
     )
       .bind(nowIso(), conversation.id)
       .run()
-  } else if (type === "email.bounced" || type === "email.complained" || type === "contact.unsubscribed") {
+  } else if (
+    type === "email.bounced" ||
+    type === "email.complained" ||
+    type === "email.suppressed"
+  ) {
     const contact = await contactFor(env, conversation.contact_id)
     if (contact) {
       await env.GROWTH_DB.prepare(
