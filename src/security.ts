@@ -86,7 +86,7 @@ export async function verifyResendWebhook(request: Request, env: Env, rawBody: s
 
   const key = await crypto.subtle.importKey(
     "raw",
-    secretBytes,
+    Uint8Array.from(secretBytes).buffer,
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
