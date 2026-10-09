@@ -300,6 +300,90 @@ async function fetchOcdsFeed(env: Env, source: string, endpoint: string) {
   }
 }
 
+async function discoverGlobalProcurementSignals(env: Env) {
+  const query =
+    '("request for proposal" OR tender OR procurement) ("payments" OR "transaction banking" OR "financial infrastructure" OR "cross-border payments" OR "payment platform")'
+  const url = new URL("https://api.gdeltproject.org/api/v2/doc/doc")
+  url.searchParams.set("query", query)
+  url.searchParams.set("mode", "ArtList")
+  url.searchParams.set("format", "json")
+  url.searchParams.set("maxrecords", "35")
+  url.searchParams.set("sort", "HybridRel")
+
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return 0
+    const payload = (await response.json()) as {
+      articles?: Array<{ title: string; url: string; seendate?: string; sourcecountry?: string }>
+    }
+    const articles = payload.articles || []
+    if (!articles.length) return 0
+
+    const extracted =
+      (await aiJson<
+        Array<{
+          article_index: number
+          buyer_name?: string
+          title: string
+          country_code?: string
+          score: number
+          summary: string
+        }>
+      >(
+        env,
+        `Extract genuine procurement, tender or RFP opportunities that may fit GIBP.
+Return a JSON array only with article_index, buyer_name, title, country_code, score and summary.
+Only include opportunities credibly related to payment execution/orchestration, transaction banking, liquidity, settlement, clearing, cross-border payments or financial infrastructure.
+Exclude ordinary partnership announcements and general news. Score 0-100.`,
+        articles.map((article, index) => `${index}: ${article.title}`).join("\n").slice(0, 12000),
+      )) || []
+
+    let stored = 0
+    for (const candidate of extracted.slice(0, 12)) {
+      const article = articles[candidate.article_index]
+      if (!article || clampScore(candidate.score) < 55) continue
+      const now = nowIso()
+      const score = clampScore(candidate.score)
+      const status = score >= Number(env.RFP_MIN_SCORE || 70) ? "qualified" : "monitor"
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO opportunities
+          (id,kind,title,source,source_url,external_id,buyer_name,country_code,score,status,
+           summary,metadata_json,created_at,updated_at)
+         VALUES (?,'rfp',?,'gdelt_procurement',?,?,?,?,?,?,?, ?,?,?)
+         ON CONFLICT(source,source_url) DO UPDATE SET
+           score=MAX(opportunities.score,excluded.score),
+           status=CASE WHEN excluded.score >= ? THEN 'qualified' ELSE opportunities.status END,
+           summary=excluded.summary,
+           metadata_json=excluded.metadata_json,
+           updated_at=excluded.updated_at`,
+      )
+        .bind(
+          id(),
+          candidate.title || article.title,
+          article.url,
+          article.url,
+          candidate.buyer_name || null,
+          candidate.country_code || null,
+          score,
+          status,
+          candidate.summary || article.title,
+          JSON.stringify({ article, candidate }),
+          now,
+          now,
+          Number(env.RFP_MIN_SCORE || 70),
+        )
+        .run()
+      stored += 1
+    }
+    return stored
+  } catch (error) {
+    await audit(env, "procurement", "global_signal_exception", "source", "gdelt_procurement", {
+      error: error instanceof Error ? error.message : "unknown",
+    })
+    return 0
+  }
+}
+
 export async function discoverUkProcurement(env: Env) {
   const contractsFinder = await fetchOcdsFeed(
     env,
@@ -313,7 +397,13 @@ export async function discoverUkProcurement(env: Env) {
     "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
   )
 
-  const result = { contracts_finder: contractsFinder, find_a_tender: findATender }
+  const globalSignals = await discoverGlobalProcurementSignals(env)
+
+  const result = {
+    contracts_finder: contractsFinder,
+    find_a_tender: findATender,
+    global_signals: globalSignals,
+  }
   await audit(env, "procurement", "uk_batch", "source", "uk_public_procurement", result)
   return result
 }
