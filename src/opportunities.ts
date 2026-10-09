@@ -268,8 +268,16 @@ async function fetchOcdsFeed(env: Env, source: string, endpoint: string) {
   const to = new Date()
   const from = new Date(Date.now() - 30 * 3600_000)
   const url = new URL(endpoint)
-  url.searchParams.set("publishedFrom", from.toISOString())
-  url.searchParams.set("publishedTo", to.toISOString())
+  const fromValue = from.toISOString().slice(0, 19)
+  const toValue = to.toISOString().slice(0, 19)
+
+  if (source === "find_a_tender") {
+    url.searchParams.set("updatedFrom", fromValue)
+    url.searchParams.set("updatedTo", toValue)
+  } else {
+    url.searchParams.set("publishedFrom", fromValue)
+    url.searchParams.set("publishedTo", toValue)
+  }
   url.searchParams.set("stages", "planning,tender")
   url.searchParams.set("limit", "100")
 
@@ -312,7 +320,13 @@ async function discoverGlobalProcurementSignals(env: Env) {
 
   try {
     const response = await fetch(url)
-    if (!response.ok) return 0
+    if (!response.ok) {
+      await audit(env, "procurement", "global_signal_failed", "source", "gdelt_procurement", {
+        status: response.status,
+        retry_after: response.headers.get("retry-after"),
+      })
+      return 0
+    }
     const payload = (await response.json()) as {
       articles?: Array<{ title: string; url: string; seendate?: string; sourcecountry?: string }>
     }
