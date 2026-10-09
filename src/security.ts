@@ -101,3 +101,58 @@ export async function verifyResendWebhook(request: Request, env: Env, rawBody: s
     .map((part) => part.trim())
     .some((part) => part.startsWith("v1,") && part.slice(3) === expected)
 }
+
+
+type IntentClaims = {
+  v: 1
+  c: string
+  a: string
+  exp: number
+}
+
+function intentSecret(env: Env) {
+  return env.INTENT_SIGNING_SECRET || env.UNSUBSCRIBE_SECRET || null
+}
+
+export async function makeIntentToken(
+  conversationId: string,
+  accountId: string,
+  env: Env,
+  ttlDays = 30,
+) {
+  const secret = intentSecret(env)
+  if (!secret) throw new Error("INTENT_SIGNING_SECRET is required")
+  const claims: IntentClaims = {
+    v: 1,
+    c: conversationId,
+    a: accountId,
+    exp: Math.floor(Date.now() / 1000) + Math.max(1, ttlDays) * 86400,
+  }
+  const payload = base64Url(encoder.encode(JSON.stringify(claims)))
+  const signature = base64Url(await hmac(secret, payload))
+  return `${payload}.${signature}`
+}
+
+export async function readIntentToken(token: string, env: Env): Promise<IntentClaims | null> {
+  const secret = intentSecret(env)
+  if (!secret) return null
+  const [payload, signature] = token.split(".")
+  if (!payload || !signature) return null
+
+  const expected = await hmac(secret, payload)
+  const received = decodeBase64(signature)
+  if (expected.length !== received.length) return null
+
+  let diff = 0
+  for (let i = 0; i < expected.length; i += 1) diff |= expected[i] ^ received[i]
+  if (diff !== 0) return null
+
+  try {
+    const claims = JSON.parse(new TextDecoder().decode(decodeBase64(payload))) as IntentClaims
+    if (claims.v !== 1 || !claims.c || !claims.a || !Number.isFinite(claims.exp)) return null
+    if (claims.exp < Math.floor(Date.now() / 1000)) return null
+    return claims
+  } catch {
+    return null
+  }
+}
