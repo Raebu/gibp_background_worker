@@ -2,7 +2,7 @@ import type { Account, Contact, Conversation, Env, ReplyClassification } from ".
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
-import { discoverNewsCandidates, enrichAccount } from "./discovery"
+import { discoverNewsCandidates, discoverOfficialBankDirectories, enrichAccount } from "./discovery"
 import { fetchReceivedEmail, recordOutbound, recordSimulation, sendInternalResend, sendResend } from "./email"
 import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
@@ -851,10 +851,11 @@ export async function runQueueJob(
     if (!(await shouldRunDiscovery(env))) {
       result = { skipped: true, reason: "not_due" }
     } else {
+      const directories = await discoverOfficialBankDirectories(env)
       const direct = await discoverNewsCandidates(env)
       const partners = await discoverPartnerCandidates(env)
       await setSetting(env, "last_discovery_at", nowIso())
-      result = { direct, partners }
+      result = { directories, direct, partners }
     }
   } else if (kind === "procurement") {
     if (!(await shouldRunProcurement(env))) {
