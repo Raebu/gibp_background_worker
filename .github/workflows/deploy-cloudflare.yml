@@ -258,6 +258,18 @@ jobs:
               (SELECT COUNT(*) FROM opportunity_handoffs WHERE status='ready') AS ready_procurement_handoffs;
           " | tee /tmp/commissioning-metrics.json
 
+      - name: Print discovery source diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT category,action,entity_id,detail_json,created_at
+            FROM audit_events
+            WHERE category IN ('discovery','procurement','ai')
+            ORDER BY created_at DESC
+            LIMIT 25;
+          " | tee /tmp/discovery-diagnostics.json
+
       - name: Confirm deployment configuration remained dry-run
         run: |
           node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync("wrangler.jsonc","utf8"));if(c.vars.SEND_MODE!=="dry_run")process.exit(1)'
