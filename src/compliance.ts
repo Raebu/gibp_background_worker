@@ -1,5 +1,6 @@
 import type { Account, Contact, Env } from "./types"
 import { countToday } from "./db"
+import { currentNewOutreachCap } from "./ramp"
 
 const freeMailDomains = new Set([
   "gmail.com",
@@ -67,7 +68,10 @@ export async function canSendTo(
     return { allowed: false, reason: "corporate_b2b_not_permitted" }
   }
 
-  if (!env.BUSINESS_POSTAL_ADDRESS || !env.UNSUBSCRIBE_SECRET) {
+  if (
+    (env.SEND_MODE || "dry_run") === "live" &&
+    (!env.BUSINESS_POSTAL_ADDRESS || !env.UNSUBSCRIBE_SECRET)
+  ) {
     return { allowed: false, reason: "sender_compliance_configuration_incomplete" }
   }
 
@@ -80,7 +84,7 @@ export async function canSendTo(
   if (sentToday >= dailyCap) return { allowed: false, reason: "daily_send_cap" }
 
   if (isInitial) {
-    const newCap = Number(env.DAILY_NEW_OUTREACH_CAP || 20)
+    const newCap = await currentNewOutreachCap(env)
     const newToday = await countToday(
       env,
       `SELECT COUNT(*) AS total FROM messages

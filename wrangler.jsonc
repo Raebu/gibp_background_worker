@@ -8,7 +8,23 @@
     "enabled": true
   },
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["0 * * * *"]
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "GROWTH_QUEUE",
+        "queue": "gibp-growth-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "gibp-growth-jobs",
+        "max_batch_size": 6,
+        "max_batch_timeout": 5,
+        "max_retries": 3
+      }
+    ]
   },
   "d1_databases": [
     {
@@ -30,6 +46,9 @@
     "AI_DAILY_CALL_CAP": "30",
     "DAILY_SEND_CAP": "50",
     "DAILY_NEW_OUTREACH_CAP": "20",
+    "RAMP_START_CAP": "5",
+    "RFP_MIN_SCORE": "70",
+    "RFP_HANDOFF_SCORE": "82",
     "SERIOUS_THRESHOLD": "85",
     "DEFAULT_JURISDICTION_MODE": "monitor_only",
     "RETENTION_DAYS": "365"

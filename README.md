@@ -10,14 +10,17 @@ The goal is deliberately **not** "send lots of cold email". The goal is:
 
 The first production-oriented build contains:
 
-- **Global discovery** using GDELT news triggers.
+- **Global direct-sales discovery** using GDELT news triggers.
+- **Separate autonomous partner-acquisition pipeline** for integrators, consultancies, fintech infrastructure firms and potential distribution/referral partners.
+- **Procurement/RFP discovery** using global GDELT tender signals plus official UK Contracts Finder and Find a Tender OCDS feeds.
 - **Free organisation enrichment** using Wikidata and GLEIF before any paid enrichment is considered.
 - **Public-contact discovery** from official company websites only; it does not guess email addresses.
 - **Robots.txt-aware crawling** with strict page/subrequest limits.
 - **Account research/scoring** using Cloudflare Workers AI when available, with deterministic fallbacks.
 - **Compliance-by-jurisdiction**. Unknown jurisdictions default to monitor-only rather than "send everywhere".
 - **Autonomous outreach sequences** with a maximum of three outbound messages before nurture.
-- **Hard daily sending limits** designed to stay comfortably below low-cost/free provider ceilings.
+- **Adaptive sender-reputation ramp** starting at 5 new contacts/day, increasing only after enough healthy delivery/reply history and reducing automatically on bounce/complaint risk.
+- **Hard total daily sending limits** designed to stay comfortably below low-cost/free provider ceilings.
 - **Resend sending + inbound replies + delivery/open/click/bounce/complaint webhooks**.
 - **Cryptographic Resend webhook verification** (Svix signatures).
 - **Reply classification** into positive, information request, meeting request, referral, not-now, negative, unsubscribe, commercial terms, security/legal, or other.
@@ -70,7 +73,8 @@ GDELT / imports / website intent
 
 The architecture is intentionally serverless and scale-to-zero:
 
-- Cloudflare Worker for orchestration/API/cron.
+- Cloudflare Worker for the API and lightweight scheduling.
+- Cloudflare Queues for background discovery/research/outreach so Cron does not perform heavy work.
 - Cloudflare D1 for the CRM/state machine.
 - Cloudflare Workers AI for limited research/copy/classification. The engine enforces an independent daily AI-call cap.
 - Resend for sending and receiving.
@@ -109,7 +113,8 @@ This is intentional. Global discovery can be automatic while email policy remain
 
 - `SEND_MODE=dry_run`
 - 50 total outbound messages/day
-- 20 new first-contact messages/day
+- 5 new first-contact messages/day initially
+- automatic reputation ramp up to a configured ceiling of 20 new first contacts/day
 - 3-message maximum autonomous cold sequence
 - serious handoff threshold: 85/100
 - 30 Workers AI calls/day
@@ -118,13 +123,16 @@ These are configuration values, not marketing targets. Raise them only after sen
 
 ## Cloudflare setup
 
-### 1. Create D1
+### 1. Create Cloudflare state resources
 
 ```bash
-npx wrangler d1 create gibp-growth
+npx wrangler d1 create gibp-growth --location weur
+npx wrangler queues create gibp-growth-jobs
 ```
 
-Copy the returned database ID into `wrangler.jsonc`.
+Copy the returned D1 database ID into `wrangler.jsonc`. The Queue binding is already configured.
+
+Alternatively, the repository contains a manual GitHub Actions workflow named **Provision and deploy Cloudflare**. Once `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` exist as repository secrets, it resolves/creates the D1 database, ensures the queue exists, applies migrations and deploys while preserving `SEND_MODE=dry_run`.
 
 ### 2. Apply migrations
 
@@ -176,7 +184,8 @@ At minimum subscribe to:
 - `email.clicked`
 - `email.bounced`
 - `email.complained`
-- `contact.unsubscribed`
+- `email.suppressed`
+- `suppression.added`
 
 Store the webhook signing secret as `RESEND_WEBHOOK_SECRET`.
 
@@ -248,8 +257,10 @@ Recommended event weights already exist for trust, security, regulatory, archite
 
 - `GET /health` — public health check.
 - `GET /admin/status` — engine/config/CRM metrics.
-- `GET /admin/handoffs` — serious opportunities only.
-- `POST /admin/run` — manually trigger a full worker tick.
+- `GET /admin/handoffs` — serious sales and procurement opportunities only.
+- `GET /admin/opportunities` — current qualified/monitored procurement opportunities.
+- `POST /admin/enqueue` — enqueue the normal autonomous background phases.
+- `POST /admin/run` — manually run all phases synchronously for diagnostics.
 - `POST /admin/import` — import accounts/contacts.
 - `POST /admin/policy` — explicitly approve/update a jurisdiction policy.
 - `POST /events/website` — signed first-party website intent.
@@ -284,8 +295,8 @@ and deploy.
 The architecture is intentionally ready for:
 
 - richer official bank/payment directories;
-- public RFP/procurement discovery;
-- partner-program discovery;
+- additional official procurement sources beyond the UK/global-signal layer;
+- formal partner-program directory discovery;
 - event/conference intelligence;
 - optional Apollo or other enrichment provider;
 - meeting-calendar booking after qualification;

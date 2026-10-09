@@ -27,9 +27,20 @@ export async function sendResend(
   let text = input.text.trim()
 
   if (input.includeComplianceFooter !== false) {
-    const token = await makeUnsubscribeToken(input.to, env)
+    const token = env.UNSUBSCRIBE_SECRET
+      ? await makeUnsubscribeToken(input.to, env)
+      : dryRun
+        ? "DRY_RUN"
+        : null
+
+    if (!token) throw new Error("UNSUBSCRIBE_SECRET is required for live sending")
+
     const unsubscribe = `${env.PUBLIC_BASE_URL || "https://growth.gibp.global"}/unsubscribe?token=${encodeURIComponent(token)}`
-    text += `\n\n—\nGIBP | ${env.BUSINESS_POSTAL_ADDRESS}\nYou are receiving this because we identified a potential institutional relevance to your organisation. Opt out: ${unsubscribe}`
+    const postalAddress =
+      env.BUSINESS_POSTAL_ADDRESS ||
+      (dryRun ? "[postal address required before live sending]" : "")
+
+    text += `\n\n—\nGIBP | ${postalAddress}\nYou are receiving this because we identified a potential institutional relevance to your organisation. Opt out: ${unsubscribe}`
   }
 
   if (dryRun) {

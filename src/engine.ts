@@ -4,6 +4,8 @@ import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
 import { discoverNewsCandidates, enrichAccount } from "./discovery"
 import { fetchReceivedEmail, recordOutbound, sendResend } from "./email"
+import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
+import { currentNewOutreachCap, maybeAdjustRamp } from "./ramp"
 
 function addHours(hours: number) {
   return new Date(Date.now() + hours * 3600_000).toISOString()
@@ -33,6 +35,11 @@ async function shouldRunDiscovery(env: Env) {
   return !last || Date.now() - new Date(last).getTime() > 6 * 3600_000
 }
 
+async function shouldRunProcurement(env: Env) {
+  const last = await getSetting(env, "last_procurement_at")
+  return !last || Date.now() - new Date(last).getTime() > 3 * 3600_000
+}
+
 async function processResearch(env: Env) {
   const result = await env.GROWTH_DB.prepare(
     `SELECT * FROM accounts
@@ -50,7 +57,7 @@ async function processResearch(env: Env) {
 
 async function ensureConversations(env: Env) {
   const result = await env.GROWTH_DB.prepare(
-    `SELECT ct.id AS contact_id, a.id AS account_id
+    `SELECT ct.id AS contact_id, a.id AS account_id, a.pipeline AS pipeline
      FROM contacts ct
      JOIN accounts a ON a.id=ct.account_id
      LEFT JOIN conversations c ON c.contact_id=ct.id AND c.state NOT IN ('closed','lost')
@@ -61,16 +68,16 @@ async function ensureConversations(env: Env) {
        AND a.score >= 55
      ORDER BY a.score DESC, ct.seniority_score DESC
      LIMIT 20`,
-  ).all<{ contact_id: string; account_id: string }>()
+  ).all<{ contact_id: string; account_id: string; pipeline: string }>()
 
   for (const row of result.results || []) {
     const now = nowIso()
     await env.GROWTH_DB.prepare(
       `INSERT INTO conversations
-        (id,account_id,contact_id,state,score,next_action_at,created_at,updated_at)
-       VALUES (?,?,?,'discovery',0,?,?,?)`,
+        (id,account_id,contact_id,pipeline,state,score,next_action_at,created_at,updated_at)
+       VALUES (?,?,?,?,'discovery',0,?,?,?)`,
     )
-      .bind(id(), row.account_id, row.contact_id, now, now, now)
+      .bind(id(), row.account_id, row.contact_id, row.pipeline || "direct", now, now, now)
       .run()
   }
   return result.results?.length || 0
@@ -90,10 +97,18 @@ async function makeOutreach(
     .all<{ title: string; url: string | null; strength: number }>()
 
   const facts = approvedFacts(env)
+  const pipeline = account.pipeline || "direct"
+  const objective =
+    pipeline === "partner"
+      ? "Explore a concrete referral, implementation, integration, distribution or joint-market partnership."
+      : "Explore a relevant institutional GIBP use case without assuming a current project."
+
   const prompt = `Write a concise institutional B2B email for GIBP.
 Return JSON only: {"subject":"...","text":"..."}.
 Do not claim an existing relationship, customer, regulatory permission, guaranteed saving, specific integration or capability not in the approved facts.
 Avoid hype. Use one evidence-based reason for reaching out. Maximum 140 words. End with a low-friction question.
+Commercial objective: ${objective}
+Pipeline: ${pipeline}
 This is sequence step ${step} of maximum 3.
 
 Approved GIBP facts:
@@ -116,6 +131,13 @@ Contact role/address: ${contact.role || ""} / ${contact.email}`
   if (generated?.subject && generated.text) return generated
 
   if (step === 1) {
+    if (pipeline === "partner") {
+      return {
+        subject: `Potential GIBP partnership with ${account.name}`,
+        text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the payments and financial-infrastructure ecosystem we are building around. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful to compare where a referral, implementation, integration or joint-market relationship could make sense for your clients or platform?\n\nRegards,\nGIBP Commercial Desk`,
+      }
+    }
+
     return {
       subject: `A possible fit for ${account.name}'s payments infrastructure`,
       text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the institutional payments work we focus on. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful if I sent a short architecture overview showing where GIBP can sit alongside existing providers rather than replacing them?\n\nRegards,\nGIBP Commercial Desk`,
@@ -493,6 +515,31 @@ export async function handleResendEvent(env: Env, event: any) {
     return handleInboundEmail(env, data.email_id)
   }
 
+  if (type === "suppression.added") {
+    const suppressedEmail = String(data.email || data.recipient || "").trim().toLowerCase()
+    if (suppressedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppressedEmail)) {
+      await env.GROWTH_DB.prepare(
+        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,?,?)",
+      )
+        .bind(
+          suppressedEmail,
+          String(data.reason || "suppression.added"),
+          "resend_webhook",
+          nowIso(),
+        )
+        .run()
+      await env.GROWTH_DB.prepare(
+        "UPDATE contacts SET status='suppressed', updated_at=? WHERE lower(email)=lower(?)",
+      )
+        .bind(nowIso(), suppressedEmail)
+        .run()
+      await audit(env, "compliance", "provider_suppression", "contact", suppressedEmail, {
+        reason: data.reason || null,
+      })
+      return { handled: true, suppression: true }
+    }
+  }
+
   const providerId = data.email_id
   if (!providerId) return { ignored: true }
 
@@ -518,7 +565,11 @@ export async function handleResendEvent(env: Env, event: any) {
     )
       .bind(nowIso(), conversation.id)
       .run()
-  } else if (type === "email.bounced" || type === "email.complained" || type === "contact.unsubscribed") {
+  } else if (
+    type === "email.bounced" ||
+    type === "email.complained" ||
+    type === "email.suppressed"
+  ) {
     const contact = await contactFor(env, conversation.contact_id)
     if (contact) {
       await env.GROWTH_DB.prepare(
@@ -612,11 +663,12 @@ export async function importData(env: Env, body: any) {
     const now = nowIso()
     await env.GROWTH_DB.prepare(
       `INSERT INTO accounts
-        (id,name,legal_name,domain,country_code,account_type,status,source,source_url,created_at,updated_at)
-       VALUES (?,?,?,?,?,?,?,'import',?,?,?)
+        (id,name,legal_name,domain,country_code,account_type,pipeline,status,source,source_url,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,'import',?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name, legal_name=excluded.legal_name, domain=excluded.domain,
-         country_code=excluded.country_code, account_type=excluded.account_type, updated_at=excluded.updated_at`,
+         country_code=excluded.country_code, account_type=excluded.account_type,
+         pipeline=excluded.pipeline, updated_at=excluded.updated_at`,
     )
       .bind(
         accountId,
@@ -625,6 +677,7 @@ export async function importData(env: Env, body: any) {
         item.domain || null,
         item.country_code || null,
         item.account_type || "unknown",
+        item.pipeline || "direct",
         item.status || "candidate",
         item.source_url || null,
         now,
@@ -697,25 +750,66 @@ async function cleanup(env: Env) {
     .run()
 }
 
-export async function runTick(env: Env) {
-  const started = nowIso()
-  const summary: Record<string, unknown> = { started }
-
-  if (await shouldRunDiscovery(env)) {
-    summary.discovery = await discoverNewsCandidates(env)
+export async function runQueueJob(
+  env: Env,
+  kind: "discovery" | "procurement" | "research" | "conversations" | "outreach" | "maintenance",
+) {
+  if (kind === "discovery") {
+    if (!(await shouldRunDiscovery(env))) return { skipped: true, reason: "not_due" }
+    const direct = await discoverNewsCandidates(env)
+    const partners = await discoverPartnerCandidates(env)
     await setSetting(env, "last_discovery_at", nowIso())
+    return { direct, partners }
   }
 
-  summary.researched = await processResearch(env)
-  summary.conversations_created = await ensureConversations(env)
-  summary.sent = await processDueConversations(env)
+  if (kind === "procurement") {
+    if (!(await shouldRunProcurement(env))) {
+      return {
+        skipped: true,
+        reason: "not_due",
+        handoffs: await processProcurementHandoffs(env),
+      }
+    }
+    const discovered = await discoverUkProcurement(env)
+    await setSetting(env, "last_procurement_at", nowIso())
+    const handoffs = await processProcurementHandoffs(env)
+    return { discovered, handoffs }
+  }
 
+  if (kind === "research") {
+    return { researched: await processResearch(env) }
+  }
+
+  if (kind === "conversations") {
+    return { conversations_created: await ensureConversations(env) }
+  }
+
+  if (kind === "outreach") {
+    return { sent: await processDueConversations(env) }
+  }
+
+  const summary: Record<string, unknown> = {
+    ramp: await maybeAdjustRamp(env),
+  }
   const lastCleanup = await getSetting(env, "last_cleanup_at")
   if (!lastCleanup || Date.now() - new Date(lastCleanup).getTime() > 24 * 3600_000) {
     await cleanup(env)
     await setSetting(env, "last_cleanup_at", nowIso())
     summary.cleanup = true
   }
+  return summary
+}
+
+export async function runTick(env: Env) {
+  const started = nowIso()
+  const summary: Record<string, unknown> = { started }
+
+  summary.discovery = await runQueueJob(env, "discovery")
+  summary.procurement = await runQueueJob(env, "procurement")
+  summary.research = await runQueueJob(env, "research")
+  summary.conversations = await runQueueJob(env, "conversations")
+  summary.outreach = await runQueueJob(env, "outreach")
+  summary.maintenance = await runQueueJob(env, "maintenance")
 
   await setSetting(env, "last_tick_at", nowIso())
   await audit(env, "engine", "tick", "worker", "gibp-background-worker", summary)
@@ -726,13 +820,20 @@ export async function metrics(env: Env) {
   const row = await env.GROWTH_DB.prepare(
     `SELECT
       (SELECT COUNT(*) FROM accounts) AS accounts,
+      (SELECT COUNT(*) FROM accounts WHERE pipeline='partner') AS partner_accounts,
       (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
       (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
       (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
       (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
       (SELECT COUNT(*) FROM handoffs WHERE status='ready') AS ready_handoffs,
+      (SELECT COUNT(*) FROM opportunities WHERE kind='rfp' AND status IN ('qualified','handoff')) AS qualified_rfps,
+      (SELECT COUNT(*) FROM opportunity_handoffs WHERE status='ready') AS ready_procurement_handoffs,
       (SELECT COUNT(*) FROM messages WHERE direction='outbound' AND created_at >= datetime('now','start of day')) AS sent_today,
       (SELECT COUNT(*) FROM messages WHERE direction='inbound' AND created_at >= datetime('now','start of day')) AS replies_today`,
   ).first()
-  return row || {}
+
+  return {
+    ...(row || {}),
+    new_outreach_cap: await currentNewOutreachCap(env),
+  }
 }

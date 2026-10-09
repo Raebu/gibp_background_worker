@@ -1,0 +1,56 @@
+name: Provision and deploy Cloudflare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+
+      - name: Validate Cloudflare credentials
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+
+      - name: Resolve or create D1
+        shell: bash
+        run: |
+          set -euo pipefail
+          if npx wrangler d1 info gibp-growth --json > /tmp/d1-info.json 2>/tmp/d1-info.err; then
+            node scripts/set-d1-from-info.mjs /tmp/d1-info.json
+          else
+            cat /tmp/d1-info.err || true
+            npx wrangler d1 create gibp-growth --location weur --binding GROWTH_DB --update-config
+          fi
+
+      - name: Ensure background queue exists
+        shell: bash
+        run: |
+          npx wrangler queues create gibp-growth-jobs || true
+
+      - name: Apply D1 migrations
+        run: npx wrangler d1 migrations apply GROWTH_DB --remote
+
+      - name: Deploy Worker in configured mode
+        run: npx wrangler deploy
+
+      - name: Confirm deployment configuration remained dry-run
+        run: |
+          node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync("wrangler.jsonc","utf8"));if(c.vars.SEND_MODE!=="dry_run")process.exit(1)'
