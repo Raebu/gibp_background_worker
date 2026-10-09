@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest"
 
 describe("commercial engine invariants", () => {
   it("keeps live sending opt-in", () => {
-    const mode = undefined || "dry_run"
+    const configuredMode = null as string | null
+    const mode = configuredMode ?? "dry_run"
     expect(mode).toBe("dry_run")
   })
 
