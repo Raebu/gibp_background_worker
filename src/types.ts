@@ -24,6 +24,7 @@ export interface Env {
   RESEND_API_KEY?: string
   RESEND_WEBHOOK_SECRET?: string
   UNSUBSCRIBE_SECRET?: string
+  INTENT_SIGNING_SECRET?: string
   ADMIN_TOKEN?: string
   SITE_EVENT_TOKEN?: string
   BUSINESS_POSTAL_ADDRESS?: string

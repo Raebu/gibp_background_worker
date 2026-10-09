@@ -75,12 +75,34 @@ jobs:
           done
           exit 1
 
+      - name: Verify branded growth domain
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6 7 8; do
+            if curl --fail --silent --show-error "https://growth.gibp.global/health" | tee /tmp/branded-health.json; then
+              grep -q '"ok":true' /tmp/branded-health.json
+              grep -q '"mode":"dry_run"' /tmp/branded-health.json
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
+
       - name: Ensure internal unsubscribe secret exists
         shell: bash
         run: |
           set -euo pipefail
           if ! npx wrangler secret list | grep -q 'UNSUBSCRIBE_SECRET'; then
             openssl rand -hex 32 | npx wrangler secret put UNSUBSCRIBE_SECRET
+          fi
+
+      - name: Ensure website intent signing secret exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! npx wrangler secret list | grep -q 'INTENT_SIGNING_SECRET'; then
+            openssl rand -hex 32 | npx wrangler secret put INTENT_SIGNING_SECRET
           fi
 
       - name: Bootstrap Resend integration

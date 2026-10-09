@@ -3,7 +3,8 @@ import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
 import { discoverNewsCandidates, enrichAccount } from "./discovery"
-import { fetchReceivedEmail, recordOutbound, sendResend } from "./email"
+import { fetchReceivedEmail, recordOutbound, sendInternalResend, sendResend } from "./email"
+import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
 import { currentNewOutreachCap, maybeAdjustRamp } from "./ramp"
 
@@ -128,28 +129,55 @@ Contact role/address: ${contact.role || ""} / ${contact.email}`
     prompt,
   )
 
-  if (generated?.subject && generated.text) return generated
+  let copy: { subject: string; text: string }
 
-  if (step === 1) {
-    if (pipeline === "partner") {
-      return {
-        subject: `Potential GIBP partnership with ${account.name}`,
-        text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the payments and financial-infrastructure ecosystem we are building around. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful to compare where a referral, implementation, integration or joint-market relationship could make sense for your clients or platform?\n\nRegards,\nGIBP Commercial Desk`,
-      }
+  if (generated?.subject && generated.text) {
+    copy = generated
+  } else if (step === 1 && pipeline === "partner") {
+    copy = {
+      subject: `Potential GIBP partnership with ${account.name}`,
+      text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the payments and financial-infrastructure ecosystem we are building around. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful to compare where a referral, implementation, integration or joint-market relationship could make sense for your clients or platform?\n\nRegards,\nGIBP Commercial Desk`,
     }
-
-    return {
+  } else if (step === 1) {
+    copy = {
       subject: `A possible fit for ${account.name}'s payments infrastructure`,
       text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the institutional payments work we focus on. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful if I sent a short architecture overview showing where GIBP can sit alongside existing providers rather than replacing them?\n\nRegards,\nGIBP Commercial Desk`,
     }
+  } else {
+    copy = {
+      subject: `Re: GIBP and ${account.name}`,
+      text:
+        step === 2
+          ? "Hello,\n\nFollowing up in case the architecture overview would be useful. I can keep it focused on the areas most relevant to your current payments or treasury priorities.\n\nRegards,\nGIBP Commercial Desk"
+          : "Hello,\n\nI’ll close the loop after this note. If institutional payment execution, policy or liquidity orchestration becomes relevant later, I’m happy to send the concise technical overview.\n\nRegards,\nGIBP Commercial Desk",
+    }
   }
 
+  const type = account.account_type.toLowerCase()
+  const landingPath =
+    pipeline === "partner"
+      ? "/partners"
+      : type.includes("bank")
+        ? "/solutions/banks"
+        : type.includes("payment")
+          ? "/solutions/payment-companies"
+          : type.includes("fintech")
+            ? "/solutions/fintech-platforms"
+            : type.includes("liquidity")
+              ? "/solutions/liquidity-providers"
+              : type.includes("settlement")
+                ? "/solutions/settlement-networks"
+                : type.includes("infrastructure")
+                  ? "/solutions/market-infrastructure"
+                  : "/solutions"
+
+  const intentToken = await makeIntentToken(conversation.id, account.id, env)
+  const overviewUrl = new URL(landingPath, env.GIBP_SITE_URL || "https://www.gibp.global")
+  overviewUrl.searchParams.set("gi", intentToken)
+
   return {
-    subject: `Re: GIBP and ${account.name}`,
-    text:
-      step === 2
-        ? "Hello,\n\nFollowing up in case the architecture overview would be useful. I can keep it focused on the areas most relevant to your current payments or treasury priorities.\n\nRegards,\nGIBP Commercial Desk"
-        : "Hello,\n\nI’ll close the loop after this note. If institutional payment execution, policy or liquidity orchestration becomes relevant later, I’m happy to send the concise technical overview.\n\nRegards,\nGIBP Commercial Desk",
+    subject: copy.subject,
+    text: `${copy.text.trim()}\n\nRelevant GIBP overview: ${overviewUrl.toString()}`,
   }
 }
 
@@ -306,11 +334,10 @@ async function createHandoff(
     .run()
 
   if (env.HANDOFF_TO) {
-    const result = await sendResend(env, {
+    const result = await sendInternalResend(env, {
       to: env.HANDOFF_TO,
       subject: `SERIOUS GIBP OPPORTUNITY — ${account.name}`,
       text: `A serious GIBP opportunity is ready.\n\nOrganisation: ${account.name}\nContact: ${contact.name || contact.email} ${contact.role ? `(${contact.role})` : ""}\nReason: ${classification.summary}\nIntent: ${classification.intent}\nConversation score: ${briefing.conversation_score}\n\nFull briefing:\n${JSON.stringify(briefing, null, 2)}`,
-      includeComplianceFooter: false,
     })
     await audit(env, "handoff", "email_notification", "conversation", conversation.id, {
       provider_id: result.id,
@@ -592,11 +619,15 @@ export async function handleResendEvent(env: Env, event: any) {
   return { handled: true }
 }
 
-export async function recordWebsiteIntent(env: Env, payload: any) {
-  const eventType = String(payload.event_type || payload.event || "page_view")
+export async function recordWebsiteIntent(
+  env: Env,
+  payload: any,
+  options: { trusted?: boolean } = {},
+) {
   const weightMap: Record<string, number> = {
     page_view: 2,
-    pricing_view: 8,
+    solutions_view: 5,
+    partner_view: 8,
     trust_view: 7,
     security_view: 7,
     regulatory_view: 8,
@@ -605,19 +636,58 @@ export async function recordWebsiteIntent(env: Env, payload: any) {
     contact: 20,
     meeting: 35,
   }
-  const weight = Math.max(1, Math.min(50, Number(payload.weight || weightMap[eventType] || 3)))
-  const conversationId = payload.conversation_id || null
-  const contactId = payload.contact_id || null
-  let accountId = payload.account_id || null
 
-  if (!accountId && payload.account_domain) {
-    const account = await env.GROWTH_DB.prepare(
-      "SELECT id FROM accounts WHERE lower(domain)=lower(?)",
-    )
-      .bind(String(payload.account_domain).replace(/^www\./, ""))
-      .first<{ id: string }>()
-    accountId = account?.id || null
+  const requestedType = String(payload.event_type || payload.event || "page_view")
+  const eventType = Object.hasOwn(weightMap, requestedType) ? requestedType : "page_view"
+  const baseWeight = weightMap[eventType]
+  const weight = options.trusted
+    ? Math.max(1, Math.min(50, Number(payload.weight || baseWeight)))
+    : baseWeight
+
+  let conversationId: string | null = null
+  let contactId: string | null = null
+  let accountId: string | null = null
+  let attributed = false
+
+  const intentToken = typeof payload.intent_token === "string" ? payload.intent_token : ""
+  if (intentToken) {
+    const claims = await readIntentToken(intentToken, env)
+    if (claims) {
+      const conversation = await env.GROWTH_DB.prepare(
+        "SELECT id,account_id,contact_id FROM conversations WHERE id=? AND account_id=? LIMIT 1",
+      )
+        .bind(claims.c, claims.a)
+        .first<{ id: string; account_id: string; contact_id: string }>()
+      if (conversation) {
+        conversationId = conversation.id
+        accountId = conversation.account_id
+        contactId = conversation.contact_id
+        attributed = true
+      }
+    }
   }
+
+  if (options.trusted && !attributed) {
+    conversationId = payload.conversation_id || null
+    contactId = payload.contact_id || null
+    accountId = payload.account_id || null
+
+    if (!accountId && payload.account_domain) {
+      const account = await env.GROWTH_DB.prepare(
+        "SELECT id FROM accounts WHERE lower(domain)=lower(?)",
+      )
+        .bind(String(payload.account_domain).replace(/^www\./, ""))
+        .first<{ id: string }>()
+      accountId = account?.id || null
+    }
+  }
+
+  const metadata = payload.metadata && typeof payload.metadata === "object"
+    ? {
+        site: String(payload.metadata.site || "").slice(0, 80),
+        source: String(payload.metadata.source || "").slice(0, 80),
+      }
+    : {}
 
   await env.GROWTH_DB.prepare(
     `INSERT INTO website_intent
@@ -630,9 +700,9 @@ export async function recordWebsiteIntent(env: Env, payload: any) {
       contactId,
       conversationId,
       eventType,
-      payload.path || null,
+      String(payload.path || "").slice(0, 500) || null,
       weight,
-      JSON.stringify(payload.metadata || {}),
+      JSON.stringify({ ...metadata, attributed }),
       nowIso(),
     )
     .run()
@@ -651,7 +721,7 @@ export async function recordWebsiteIntent(env: Env, payload: any) {
       .bind(weight, Math.ceil(weight / 2), nowIso(), accountId)
       .run()
   }
-  return { recorded: true, weight }
+  return { recorded: true, event_type: eventType, weight, attributed }
 }
 
 export async function importData(env: Env, body: any) {

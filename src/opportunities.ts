@@ -1,7 +1,7 @@
 import type { Env } from "./types"
 import { aiJson } from "./ai"
 import { audit, id, nowIso } from "./db"
-import { sendResend } from "./email"
+import { sendInternalResend } from "./email"
 
 const partnerQuery =
   '("payments partnership" OR "payment technology partnership" OR "banking technology partnership" OR "payments transformation partner" OR "transaction banking partnership" OR "fintech partnership")'
@@ -479,11 +479,10 @@ export async function processProcurementHandoffs(env: Env) {
       .run()
 
     if (env.HANDOFF_TO) {
-      await sendResend(env, {
+      await sendInternalResend(env, {
         to: env.HANDOFF_TO,
         subject: `SERIOUS GIBP PROCUREMENT OPPORTUNITY — ${opportunity.title}`,
         text: `A high-fit public procurement opportunity is ready for review.\n\n${JSON.stringify(briefing, null, 2)}`,
-        includeComplianceFooter: false,
       })
     }
     created += 1
