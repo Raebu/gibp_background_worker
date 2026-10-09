@@ -3,7 +3,7 @@ import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
 import { discoverNewsCandidates, enrichAccount } from "./discovery"
-import { fetchReceivedEmail, recordOutbound, sendInternalResend, sendResend } from "./email"
+import { fetchReceivedEmail, recordOutbound, recordSimulation, sendInternalResend, sendResend } from "./email"
 import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
 import { currentNewOutreachCap, maybeAdjustRamp } from "./ramp"
@@ -234,6 +234,26 @@ async function processDueConversations(env: Env) {
       conversationId: conversation.id,
       classification: isInitial ? "initial" : `followup_${step}`,
     })
+    const classification = isInitial ? "initial" : `followup_${step}`
+
+    if (result.dry_run) {
+      await recordSimulation(
+        env,
+        conversation.id,
+        copy.subject,
+        result.text,
+        classification,
+        { dry_run: true, step },
+      )
+      await env.GROWTH_DB.prepare(
+        "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
+      )
+        .bind(daysFromNow(1), nowIso(), conversation.id)
+        .run()
+      sent += 1
+      continue
+    }
+
     await recordOutbound(
       env,
       conversation.id,
@@ -241,8 +261,8 @@ async function processDueConversations(env: Env) {
       result.message_id,
       copy.subject,
       result.text,
-      isInitial ? "initial" : `followup_${step}`,
-      { dry_run: result.dry_run },
+      classification,
+      { dry_run: false },
     )
 
     const next = step === 1 ? daysFromNow(4) : step === 2 ? daysFromNow(7) : daysFromNow(30)
