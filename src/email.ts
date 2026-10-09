@@ -135,3 +135,40 @@ export async function recordOutbound(
     )
     .run()
 }
+
+
+export async function sendInternalResend(
+  env: Env,
+  input: { to: string; subject: string; text: string },
+) {
+  if (!env.HANDOFF_TO || input.to.toLowerCase() !== env.HANDOFF_TO.toLowerCase()) {
+    throw new Error("Internal email recipient must match HANDOFF_TO")
+  }
+  if (!env.RESEND_API_KEY) throw new Error("RESEND_API_KEY is required for internal mail")
+  if (!env.FROM_EMAIL) throw new Error("FROM_EMAIL is required for internal mail")
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.FROM_EMAIL,
+      to: [input.to],
+      subject: input.subject,
+      text: input.text,
+      html: `<div style="font-family:Arial,sans-serif;line-height:1.55;white-space:pre-wrap">${escapeHtml(input.text)}</div>`,
+      tags: [{ name: "system", value: "gibp-internal-handoff" }],
+    }),
+  })
+
+  const data = (await response.json().catch(() => ({}))) as {
+    id?: string
+    message?: string
+  }
+  if (!response.ok || !data.id) {
+    throw new Error(`Resend internal send failed (${response.status}): ${data.message || "unknown error"}`)
+  }
+  return { id: data.id }
+}
