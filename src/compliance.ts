@@ -68,7 +68,10 @@ export async function canSendTo(
     return { allowed: false, reason: "corporate_b2b_not_permitted" }
   }
 
-  if (!env.BUSINESS_POSTAL_ADDRESS || !env.UNSUBSCRIBE_SECRET) {
+  if (
+    (env.SEND_MODE || "dry_run") === "live" &&
+    (!env.BUSINESS_POSTAL_ADDRESS || !env.UNSUBSCRIBE_SECRET)
+  ) {
     return { allowed: false, reason: "sender_compliance_configuration_incomplete" }
   }
 
