@@ -754,50 +754,55 @@ export async function runQueueJob(
   env: Env,
   kind: "discovery" | "procurement" | "research" | "conversations" | "outreach" | "maintenance",
 ) {
-  if (kind === "discovery") {
-    if (!(await shouldRunDiscovery(env))) return { skipped: true, reason: "not_due" }
-    const direct = await discoverNewsCandidates(env)
-    const partners = await discoverPartnerCandidates(env)
-    await setSetting(env, "last_discovery_at", nowIso())
-    return { direct, partners }
-  }
+  const started = nowIso()
+  let result: Record<string, unknown>
 
-  if (kind === "procurement") {
+  if (kind === "discovery") {
+    if (!(await shouldRunDiscovery(env))) {
+      result = { skipped: true, reason: "not_due" }
+    } else {
+      const direct = await discoverNewsCandidates(env)
+      const partners = await discoverPartnerCandidates(env)
+      await setSetting(env, "last_discovery_at", nowIso())
+      result = { direct, partners }
+    }
+  } else if (kind === "procurement") {
     if (!(await shouldRunProcurement(env))) {
-      return {
+      result = {
         skipped: true,
         reason: "not_due",
         handoffs: await processProcurementHandoffs(env),
       }
+    } else {
+      const discovered = await discoverUkProcurement(env)
+      await setSetting(env, "last_procurement_at", nowIso())
+      const handoffs = await processProcurementHandoffs(env)
+      result = { discovered, handoffs }
     }
-    const discovered = await discoverUkProcurement(env)
-    await setSetting(env, "last_procurement_at", nowIso())
-    const handoffs = await processProcurementHandoffs(env)
-    return { discovered, handoffs }
+  } else if (kind === "research") {
+    result = { researched: await processResearch(env) }
+  } else if (kind === "conversations") {
+    result = { conversations_created: await ensureConversations(env) }
+  } else if (kind === "outreach") {
+    result = { sent: await processDueConversations(env) }
+  } else {
+    result = {
+      ramp: await maybeAdjustRamp(env),
+    }
+    const lastCleanup = await getSetting(env, "last_cleanup_at")
+    if (!lastCleanup || Date.now() - new Date(lastCleanup).getTime() > 24 * 3600_000) {
+      await cleanup(env)
+      await setSetting(env, "last_cleanup_at", nowIso())
+      result.cleanup = true
+    }
   }
 
-  if (kind === "research") {
-    return { researched: await processResearch(env) }
-  }
-
-  if (kind === "conversations") {
-    return { conversations_created: await ensureConversations(env) }
-  }
-
-  if (kind === "outreach") {
-    return { sent: await processDueConversations(env) }
-  }
-
-  const summary: Record<string, unknown> = {
-    ramp: await maybeAdjustRamp(env),
-  }
-  const lastCleanup = await getSetting(env, "last_cleanup_at")
-  if (!lastCleanup || Date.now() - new Date(lastCleanup).getTime() > 24 * 3600_000) {
-    await cleanup(env)
-    await setSetting(env, "last_cleanup_at", nowIso())
-    summary.cleanup = true
-  }
-  return summary
+  await audit(env, "engine", "queue_job_complete", "job", kind, {
+    started,
+    finished: nowIso(),
+    result,
+  })
+  return result
 }
 
 export async function runTick(env: Env) {
