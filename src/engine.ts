@@ -1,0 +1,738 @@
+import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
+import { aiJson, classifyReply } from "./ai"
+import { canSendTo } from "./compliance"
+import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
+import { discoverNewsCandidates, enrichAccount } from "./discovery"
+import { fetchReceivedEmail, recordOutbound, sendResend } from "./email"
+
+function addHours(hours: number) {
+  return new Date(Date.now() + hours * 3600_000).toISOString()
+}
+
+function approvedFacts(env: Env) {
+  return (
+    env.GIBP_APPROVED_FACTS ||
+    "GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money. Public information is available at https://www.gibp.global."
+  )
+}
+
+async function accountFor(env: Env, idValue: string) {
+  return env.GROWTH_DB.prepare("SELECT * FROM accounts WHERE id=?").bind(idValue).first<Account>()
+}
+
+async function contactFor(env: Env, idValue: string) {
+  return env.GROWTH_DB.prepare("SELECT * FROM contacts WHERE id=?").bind(idValue).first<Contact>()
+}
+
+async function conversationFor(env: Env, idValue: string) {
+  return env.GROWTH_DB.prepare("SELECT * FROM conversations WHERE id=?").bind(idValue).first<Conversation>()
+}
+
+async function shouldRunDiscovery(env: Env) {
+  const last = await getSetting(env, "last_discovery_at")
+  return !last || Date.now() - new Date(last).getTime() > 6 * 3600_000
+}
+
+async function processResearch(env: Env) {
+  const result = await env.GROWTH_DB.prepare(
+    `SELECT * FROM accounts
+     WHERE status IN ('candidate','research')
+     AND (last_researched_at IS NULL OR last_researched_at < datetime('now','-3 day'))
+     ORDER BY score DESC, created_at ASC
+     LIMIT 2`,
+  ).all<Account>()
+
+  for (const account of result.results || []) {
+    await enrichAccount(env, account)
+  }
+  return result.results?.length || 0
+}
+
+async function ensureConversations(env: Env) {
+  const result = await env.GROWTH_DB.prepare(
+    `SELECT ct.id AS contact_id, a.id AS account_id
+     FROM contacts ct
+     JOIN accounts a ON a.id=ct.account_id
+     LEFT JOIN conversations c ON c.contact_id=ct.id AND c.state NOT IN ('closed','lost')
+     WHERE c.id IS NULL
+       AND ct.status='active'
+       AND ct.seniority_score >= 35
+       AND a.status='qualified'
+       AND a.score >= 55
+     ORDER BY a.score DESC, ct.seniority_score DESC
+     LIMIT 20`,
+  ).all<{ contact_id: string; account_id: string }>()
+
+  for (const row of result.results || []) {
+    const now = nowIso()
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO conversations
+        (id,account_id,contact_id,state,score,next_action_at,created_at,updated_at)
+       VALUES (?,?,?,'discovery',0,?,?,?)`,
+    )
+      .bind(id(), row.account_id, row.contact_id, now, now, now)
+      .run()
+  }
+  return result.results?.length || 0
+}
+
+async function makeOutreach(
+  env: Env,
+  account: Account,
+  contact: Contact,
+  conversation: Conversation,
+  step: number,
+) {
+  const signals = await env.GROWTH_DB.prepare(
+    "SELECT title,url,strength FROM signals WHERE account_id=? ORDER BY observed_at DESC LIMIT 3",
+  )
+    .bind(account.id)
+    .all<{ title: string; url: string | null; strength: number }>()
+
+  const facts = approvedFacts(env)
+  const prompt = `Write a concise institutional B2B email for GIBP.
+Return JSON only: {"subject":"...","text":"..."}.
+Do not claim an existing relationship, customer, regulatory permission, guaranteed saving, specific integration or capability not in the approved facts.
+Avoid hype. Use one evidence-based reason for reaching out. Maximum 140 words. End with a low-friction question.
+This is sequence step ${step} of maximum 3.
+
+Approved GIBP facts:
+${facts}
+
+Organisation:
+${account.name}
+Type: ${account.account_type}
+Country: ${account.country_code || "unknown"}
+Research: ${account.research_json}
+Signals: ${JSON.stringify(signals.results || [])}
+Contact role/address: ${contact.role || ""} / ${contact.email}`
+
+  const generated = await aiJson<{ subject: string; text: string }>(
+    env,
+    "You are GIBP's careful institutional commercial-development writer. Return JSON only.",
+    prompt,
+  )
+
+  if (generated?.subject && generated.text) return generated
+
+  if (step === 1) {
+    return {
+      subject: `A possible fit for ${account.name}'s payments infrastructure`,
+      text: `Hello,\n\nI’m reaching out from GIBP because ${account.name} appears relevant to the institutional payments work we focus on. GIBP is a provider-neutral financial intent, policy, liquidity and execution layer for institutional value movement across banks, payment rails and digital money.\n\nWould it be useful if I sent a short architecture overview showing where GIBP can sit alongside existing providers rather than replacing them?\n\nRegards,\nGIBP Commercial Desk`,
+    }
+  }
+
+  return {
+    subject: `Re: GIBP and ${account.name}`,
+    text:
+      step === 2
+        ? "Hello,\n\nFollowing up in case the architecture overview would be useful. I can keep it focused on the areas most relevant to your current payments or treasury priorities.\n\nRegards,\nGIBP Commercial Desk"
+        : "Hello,\n\nI’ll close the loop after this note. If institutional payment execution, policy or liquidity orchestration becomes relevant later, I’m happy to send the concise technical overview.\n\nRegards,\nGIBP Commercial Desk",
+  }
+}
+
+async function processDueConversations(env: Env) {
+  const due = await env.GROWTH_DB.prepare(
+    `SELECT * FROM conversations
+     WHERE state IN ('discovery','engaged','nurture')
+       AND next_action_at IS NOT NULL
+       AND next_action_at <= ?
+       AND human_handoff_at IS NULL
+     ORDER BY score DESC, next_action_at ASC
+     LIMIT 12`,
+  )
+    .bind(nowIso())
+    .all<Conversation>()
+
+  let sent = 0
+  for (const conversation of due.results || []) {
+    const account = await accountFor(env, conversation.account_id)
+    const contact = await contactFor(env, conversation.contact_id)
+    if (!account || !contact) continue
+
+    const isInitial = conversation.outbound_count === 0
+    const decision = await canSendTo(env, account, contact, isInitial)
+    if (!decision.allowed) {
+      await audit(env, "compliance", "send_blocked", "conversation", conversation.id, {
+        reason: decision.reason,
+      })
+      const retry =
+        /cap/.test(decision.reason) ? addHours(24) : daysFromNow(30)
+      await env.GROWTH_DB.prepare(
+        "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
+      )
+        .bind(retry, nowIso(), conversation.id)
+        .run()
+      continue
+    }
+
+    if (conversation.outbound_count >= 3) {
+      await env.GROWTH_DB.prepare(
+        "UPDATE conversations SET state='nurture', next_action_at=?, updated_at=? WHERE id=?",
+      )
+        .bind(daysFromNow(30), nowIso(), conversation.id)
+        .run()
+      continue
+    }
+
+    const step = conversation.outbound_count + 1
+    const copy = await makeOutreach(env, account, contact, conversation, step)
+    const result = await sendResend(env, {
+      to: contact.email,
+      subject: copy.subject,
+      text: copy.text,
+      conversationId: conversation.id,
+      classification: isInitial ? "initial" : `followup_${step}`,
+    })
+    await recordOutbound(
+      env,
+      conversation.id,
+      result.id,
+      result.message_id,
+      copy.subject,
+      result.text,
+      isInitial ? "initial" : `followup_${step}`,
+      { dry_run: result.dry_run },
+    )
+
+    const next = step === 1 ? daysFromNow(4) : step === 2 ? daysFromNow(7) : daysFromNow(30)
+    await env.GROWTH_DB.prepare(
+      `UPDATE conversations
+       SET outbound_count=outbound_count+1, message_count=message_count+1,
+           state=CASE WHEN ? >= 3 THEN 'nurture' ELSE state END,
+           next_action_at=?, updated_at=?
+       WHERE id=?`,
+    )
+      .bind(step, next, nowIso(), conversation.id)
+      .run()
+    await env.GROWTH_DB.prepare(
+      "UPDATE contacts SET last_contact_at=?, updated_at=? WHERE id=?",
+    )
+      .bind(nowIso(), nowIso(), contact.id)
+      .run()
+    sent += 1
+  }
+  return sent
+}
+
+async function createHandoff(
+  env: Env,
+  conversation: Conversation,
+  classification: ReplyClassification,
+) {
+  const existing = await env.GROWTH_DB.prepare(
+    "SELECT id FROM handoffs WHERE conversation_id=?",
+  )
+    .bind(conversation.id)
+    .first()
+  if (existing) return
+
+  const account = await accountFor(env, conversation.account_id)
+  const contact = await contactFor(env, conversation.contact_id)
+  if (!account || !contact) return
+
+  const messages = await env.GROWTH_DB.prepare(
+    `SELECT direction,subject,text,classification,created_at
+     FROM messages WHERE conversation_id=? ORDER BY created_at ASC LIMIT 30`,
+  )
+    .bind(conversation.id)
+    .all()
+
+  const briefing = {
+    account: {
+      name: account.name,
+      legal_name: account.legal_name,
+      domain: account.domain,
+      country: account.country_code,
+      type: account.account_type,
+      account_score: account.score,
+      research: JSON.parse(account.research_json || "{}"),
+    },
+    contact: {
+      name: contact.name,
+      role: contact.role,
+      email: contact.email,
+    },
+    conversation_score: conversation.score + classification.score_delta,
+    reason: classification.summary,
+    intent: classification.intent,
+    transcript: messages.results || [],
+  }
+
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO handoffs
+      (id,conversation_id,account_id,contact_id,priority,reason,briefing_json,status,created_at)
+     VALUES (?,?,?,?,?,?,?,'ready',?)`,
+  )
+    .bind(
+      id(),
+      conversation.id,
+      account.id,
+      contact.id,
+      classification.intent === "meeting_request" ? "high" : "normal",
+      classification.summary,
+      JSON.stringify(briefing),
+      nowIso(),
+    )
+    .run()
+
+  await env.GROWTH_DB.prepare(
+    `UPDATE conversations SET state='serious', human_handoff_at=?, next_action_at=NULL, updated_at=?
+     WHERE id=?`,
+  )
+    .bind(nowIso(), nowIso(), conversation.id)
+    .run()
+
+  if (env.HANDOFF_TO) {
+    const result = await sendResend(env, {
+      to: env.HANDOFF_TO,
+      subject: `SERIOUS GIBP OPPORTUNITY — ${account.name}`,
+      text: `A serious GIBP opportunity is ready.\n\nOrganisation: ${account.name}\nContact: ${contact.name || contact.email} ${contact.role ? `(${contact.role})` : ""}\nReason: ${classification.summary}\nIntent: ${classification.intent}\nConversation score: ${briefing.conversation_score}\n\nFull briefing:\n${JSON.stringify(briefing, null, 2)}`,
+      includeComplianceFooter: false,
+    })
+    await audit(env, "handoff", "email_notification", "conversation", conversation.id, {
+      provider_id: result.id,
+    })
+  }
+
+  if (env.HANDOFF_WEBHOOK_URL) {
+    await fetch(env.HANDOFF_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(briefing),
+    }).catch(() => undefined)
+  }
+
+  await audit(env, "handoff", "created", "conversation", conversation.id, briefing)
+}
+
+async function autoReply(
+  env: Env,
+  conversation: Conversation,
+  contact: Contact,
+  classification: ReplyClassification,
+  inboundSubject: string,
+  inboundText: string,
+  inboundMessageId?: string,
+) {
+  const facts = approvedFacts(env)
+  const generated =
+    (await aiJson<{ subject: string; text: string }>(
+      env,
+      `Write a safe B2B reply for GIBP. Return JSON only with subject and text.
+Use ONLY approved facts. Never invent customers, pricing, contracts, security guarantees, regulatory status, integrations, SLAs, exclusivity or implementation dates.
+If the question cannot be answered from approved facts, say the team can cover it in a discussion.
+Maximum 170 words.`,
+      `Approved facts:\n${facts}\n\nClassification:\n${JSON.stringify(classification)}\n\nInbound subject: ${inboundSubject}\nInbound:\n${inboundText.slice(0, 7000)}`,
+    )) || {
+      subject: inboundSubject.toLowerCase().startsWith("re:") ? inboundSubject : `Re: ${inboundSubject}`,
+      text:
+        classification.intent === "not_now"
+          ? "Thank you for letting me know. I’ll leave this with you and won’t keep chasing. If the timing changes, I’m happy to pick it up then.\n\nRegards,\nGIBP Commercial Desk"
+          : "Thank you for coming back to me. I can provide the relevant GIBP material and keep the discussion focused on your institutional requirements. If a question needs a commercial, legal or technical commitment, I’ll bring the appropriate person into the conversation.\n\nRegards,\nGIBP Commercial Desk",
+    }
+
+  const result = await sendResend(env, {
+    to: contact.email,
+    subject: generated.subject,
+    text: generated.text,
+    conversationId: conversation.id,
+    classification: "auto_reply",
+    headers: inboundMessageId
+      ? { "In-Reply-To": inboundMessageId, References: inboundMessageId }
+      : undefined,
+  })
+  await recordOutbound(
+    env,
+    conversation.id,
+    result.id,
+    result.message_id,
+    generated.subject,
+    result.text,
+    "auto_reply",
+    { dry_run: result.dry_run },
+  )
+  await env.GROWTH_DB.prepare(
+    `UPDATE conversations SET outbound_count=outbound_count+1, message_count=message_count+1,
+      state='engaged', next_action_at=?, updated_at=? WHERE id=?`,
+  )
+    .bind(daysFromNow(5), nowIso(), conversation.id)
+    .run()
+}
+
+export async function handleInboundEmail(env: Env, emailId: string) {
+  const received = await fetchReceivedEmail(env, emailId)
+  const fromMatch = received.from.match(/<([^>]+)>/)?.[1] || received.from
+  const email = fromMatch.trim().toLowerCase()
+  const contact = await env.GROWTH_DB.prepare(
+    "SELECT * FROM contacts WHERE lower(email)=lower(?)",
+  )
+    .bind(email)
+    .first<Contact>()
+  if (!contact) {
+    await audit(env, "inbound", "unmatched_email", "email", emailId, { from: email })
+    return { matched: false }
+  }
+
+  let conversation = await env.GROWTH_DB.prepare(
+    `SELECT * FROM conversations WHERE contact_id=? AND state NOT IN ('closed','lost')
+     ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(contact.id)
+    .first<Conversation>()
+
+  if (!conversation) {
+    const convId = id()
+    const now = nowIso()
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO conversations
+        (id,account_id,contact_id,state,score,next_action_at,created_at,updated_at)
+       VALUES (?,?,?,'engaged',20,?,?,?)`,
+    )
+      .bind(convId, contact.account_id, contact.id, daysFromNow(3), now, now)
+      .run()
+    conversation = await conversationFor(env, convId)
+  }
+  if (!conversation) return { matched: false }
+
+  const body = received.text || received.html?.replace(/<[^>]+>/g, " ") || ""
+  const classification = await classifyReply(env, received.subject || "", body)
+
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO messages
+      (id,conversation_id,direction,provider_id,message_id,subject,text,classification,metadata_json,created_at)
+     VALUES (?,?,'inbound',?,?,?,?,?,?,?)`,
+  )
+    .bind(
+      id(),
+      conversation.id,
+      emailId,
+      received.message_id || null,
+      received.subject || "",
+      body.slice(0, 20000),
+      classification.intent,
+      JSON.stringify(classification),
+      nowIso(),
+    )
+    .run()
+
+  const newScore = Math.max(0, Math.min(100, conversation.score + classification.score_delta))
+  await env.GROWTH_DB.prepare(
+    `UPDATE conversations SET score=?, inbound_count=inbound_count+1, message_count=message_count+1,
+      state=?, updated_at=? WHERE id=?`,
+  )
+    .bind(newScore, newScore >= 35 ? "engaged" : conversation.state, nowIso(), conversation.id)
+    .run()
+  conversation.score = newScore
+
+  if (classification.intent === "unsubscribe" || classification.intent === "negative") {
+    if (classification.intent === "unsubscribe") {
+      await env.GROWTH_DB.prepare(
+        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,'reply',?)",
+      )
+        .bind(contact.email, "recipient_request", nowIso())
+        .run()
+    }
+    if (classification.intent === "negative") {
+      await env.GROWTH_DB.prepare(
+        "UPDATE conversations SET state='closed', next_action_at=NULL, updated_at=? WHERE id=?",
+      )
+        .bind(nowIso(), conversation.id)
+        .run()
+    }
+    return { matched: true, classification }
+  }
+
+  const threshold = Number(env.SERIOUS_THRESHOLD || 85)
+  if (classification.serious || classification.requires_human || newScore >= threshold) {
+    await createHandoff(env, conversation, classification)
+    return { matched: true, classification, handoff: true }
+  }
+
+  if (classification.referral_email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(classification.referral_email)) {
+    const referralEmail = classification.referral_email.toLowerCase()
+    await env.GROWTH_DB.prepare(
+      `INSERT OR IGNORE INTO contacts
+        (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+       VALUES (?,?,?,?,?,'referral',?, ?,0,1,70,'implied','recipient_referral','active',?,?)`,
+    )
+      .bind(
+        id(),
+        contact.account_id,
+        classification.referral_name || null,
+        null,
+        referralEmail,
+        `resend:${emailId}`,
+        contact.country_code,
+        nowIso(),
+        nowIso(),
+      )
+      .run()
+  }
+
+  if (classification.should_reply) {
+    await autoReply(
+      env,
+      conversation,
+      contact,
+      classification,
+      received.subject || "",
+      body,
+      received.message_id,
+    )
+  }
+
+  return { matched: true, classification }
+}
+
+export async function handleResendEvent(env: Env, event: any) {
+  const type = String(event?.type || "")
+  const data = event?.data || {}
+
+  if (type === "email.received" && data.email_id) {
+    return handleInboundEmail(env, data.email_id)
+  }
+
+  const providerId = data.email_id
+  if (!providerId) return { ignored: true }
+
+  const message = await env.GROWTH_DB.prepare(
+    "SELECT conversation_id FROM messages WHERE provider_id=? ORDER BY created_at DESC LIMIT 1",
+  )
+    .bind(providerId)
+    .first<{ conversation_id: string }>()
+  if (!message) return { ignored: true }
+
+  const conversation = await conversationFor(env, message.conversation_id)
+  if (!conversation) return { ignored: true }
+
+  if (type === "email.opened") {
+    await env.GROWTH_DB.prepare(
+      "UPDATE conversations SET score=MIN(100,score+3), updated_at=? WHERE id=?",
+    )
+      .bind(nowIso(), conversation.id)
+      .run()
+  } else if (type === "email.clicked") {
+    await env.GROWTH_DB.prepare(
+      "UPDATE conversations SET score=MIN(100,score+8), updated_at=? WHERE id=?",
+    )
+      .bind(nowIso(), conversation.id)
+      .run()
+  } else if (type === "email.bounced" || type === "email.complained" || type === "contact.unsubscribed") {
+    const contact = await contactFor(env, conversation.contact_id)
+    if (contact) {
+      await env.GROWTH_DB.prepare(
+        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,?,?)",
+      )
+        .bind(contact.email, type, "resend_webhook", nowIso())
+        .run()
+      await env.GROWTH_DB.prepare(
+        "UPDATE contacts SET status='suppressed', updated_at=? WHERE id=?",
+      )
+        .bind(nowIso(), contact.id)
+        .run()
+    }
+    await env.GROWTH_DB.prepare(
+      "UPDATE conversations SET state='closed', next_action_at=NULL, updated_at=? WHERE id=?",
+    )
+      .bind(nowIso(), conversation.id)
+      .run()
+  }
+  return { handled: true }
+}
+
+export async function recordWebsiteIntent(env: Env, payload: any) {
+  const eventType = String(payload.event_type || payload.event || "page_view")
+  const weightMap: Record<string, number> = {
+    page_view: 2,
+    pricing_view: 8,
+    trust_view: 7,
+    security_view: 7,
+    regulatory_view: 8,
+    whitepaper: 10,
+    architecture: 12,
+    contact: 20,
+    meeting: 35,
+  }
+  const weight = Math.max(1, Math.min(50, Number(payload.weight || weightMap[eventType] || 3)))
+  const conversationId = payload.conversation_id || null
+  const contactId = payload.contact_id || null
+  let accountId = payload.account_id || null
+
+  if (!accountId && payload.account_domain) {
+    const account = await env.GROWTH_DB.prepare(
+      "SELECT id FROM accounts WHERE lower(domain)=lower(?)",
+    )
+      .bind(String(payload.account_domain).replace(/^www\./, ""))
+      .first<{ id: string }>()
+    accountId = account?.id || null
+  }
+
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO website_intent
+      (id,account_id,contact_id,conversation_id,event_type,path,weight,metadata_json,created_at)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  )
+    .bind(
+      id(),
+      accountId,
+      contactId,
+      conversationId,
+      eventType,
+      payload.path || null,
+      weight,
+      JSON.stringify(payload.metadata || {}),
+      nowIso(),
+    )
+    .run()
+
+  if (conversationId) {
+    await env.GROWTH_DB.prepare(
+      "UPDATE conversations SET score=MIN(100,score+?), updated_at=? WHERE id=?",
+    )
+      .bind(weight, nowIso(), conversationId)
+      .run()
+  }
+  if (accountId) {
+    await env.GROWTH_DB.prepare(
+      "UPDATE accounts SET engagement_score=MIN(100,engagement_score+?), score=MIN(100,score+?), updated_at=? WHERE id=?",
+    )
+      .bind(weight, Math.ceil(weight / 2), nowIso(), accountId)
+      .run()
+  }
+  return { recorded: true, weight }
+}
+
+export async function importData(env: Env, body: any) {
+  let accounts = 0
+  let contacts = 0
+  for (const item of body.accounts || []) {
+    if (!item.name) continue
+    const accountId = item.id || id()
+    const now = nowIso()
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO accounts
+        (id,name,legal_name,domain,country_code,account_type,status,source,source_url,created_at,updated_at)
+       VALUES (?,?,?,?,?,?,?,'import',?,?,?)
+       ON CONFLICT(id) DO UPDATE SET
+         name=excluded.name, legal_name=excluded.legal_name, domain=excluded.domain,
+         country_code=excluded.country_code, account_type=excluded.account_type, updated_at=excluded.updated_at`,
+    )
+      .bind(
+        accountId,
+        item.name,
+        item.legal_name || null,
+        item.domain || null,
+        item.country_code || null,
+        item.account_type || "unknown",
+        item.status || "candidate",
+        item.source_url || null,
+        now,
+        now,
+      )
+      .run()
+    accounts += 1
+
+    for (const contact of item.contacts || []) {
+      if (!contact.email) continue
+      await upsertImportedContact(env, accountId, contact, item.country_code)
+      contacts += 1
+    }
+  }
+  for (const contact of body.contacts || []) {
+    if (!contact.email || !contact.account_id) continue
+    await upsertImportedContact(env, contact.account_id, contact, contact.country_code)
+    contacts += 1
+  }
+  return { accounts, contacts }
+}
+
+async function upsertImportedContact(env: Env, accountId: string, item: any, fallbackCountry?: string) {
+  const now = nowIso()
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO contacts
+      (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
+       consent_status,lawful_basis,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)
+     ON CONFLICT(email) DO UPDATE SET
+       account_id=excluded.account_id, name=COALESCE(excluded.name,contacts.name),
+       role=COALESCE(excluded.role,contacts.role), source_url=COALESCE(excluded.source_url,contacts.source_url),
+       country_code=COALESCE(excluded.country_code,contacts.country_code),
+       is_public=MAX(contacts.is_public,excluded.is_public), verified=MAX(contacts.verified,excluded.verified),
+       seniority_score=MAX(contacts.seniority_score,excluded.seniority_score),
+       consent_status=CASE WHEN excluded.consent_status!='unknown' THEN excluded.consent_status ELSE contacts.consent_status END,
+       lawful_basis=COALESCE(excluded.lawful_basis,contacts.lawful_basis), updated_at=excluded.updated_at`,
+  )
+    .bind(
+      item.id || id(),
+      accountId,
+      item.name || null,
+      item.role || null,
+      String(item.email).toLowerCase(),
+      item.email_source || "import",
+      item.source_url || null,
+      item.country_code || fallbackCountry || null,
+      item.is_public ? 1 : 0,
+      item.verified ? 1 : 0,
+      Number(item.seniority_score || 50),
+      item.consent_status || "unknown",
+      item.lawful_basis || null,
+      now,
+      now,
+    )
+    .run()
+}
+
+async function cleanup(env: Env) {
+  const days = Math.max(30, Number(env.RETENTION_DAYS || 365))
+  await env.GROWTH_DB.prepare(
+    `DELETE FROM audit_events WHERE created_at < datetime('now', ?)`,
+  )
+    .bind(`-${days} day`)
+    .run()
+  await env.GROWTH_DB.prepare(
+    `DELETE FROM website_intent WHERE created_at < datetime('now', ?)`,
+  )
+    .bind(`-${days} day`)
+    .run()
+}
+
+export async function runTick(env: Env) {
+  const started = nowIso()
+  const summary: Record<string, unknown> = { started }
+
+  if (await shouldRunDiscovery(env)) {
+    summary.discovery = await discoverNewsCandidates(env)
+    await setSetting(env, "last_discovery_at", nowIso())
+  }
+
+  summary.researched = await processResearch(env)
+  summary.conversations_created = await ensureConversations(env)
+  summary.sent = await processDueConversations(env)
+
+  const lastCleanup = await getSetting(env, "last_cleanup_at")
+  if (!lastCleanup || Date.now() - new Date(lastCleanup).getTime() > 24 * 3600_000) {
+    await cleanup(env)
+    await setSetting(env, "last_cleanup_at", nowIso())
+    summary.cleanup = true
+  }
+
+  await setSetting(env, "last_tick_at", nowIso())
+  await audit(env, "engine", "tick", "worker", "gibp-background-worker", summary)
+  return summary
+}
+
+export async function metrics(env: Env) {
+  const row = await env.GROWTH_DB.prepare(
+    `SELECT
+      (SELECT COUNT(*) FROM accounts) AS accounts,
+      (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
+      (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
+      (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
+      (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
+      (SELECT COUNT(*) FROM handoffs WHERE status='ready') AS ready_handoffs,
+      (SELECT COUNT(*) FROM messages WHERE direction='outbound' AND created_at >= datetime('now','start of day')) AS sent_today,
+      (SELECT COUNT(*) FROM messages WHERE direction='inbound' AND created_at >= datetime('now','start of day')) AS replies_today`,
+  ).first()
+  return row || {}
+}

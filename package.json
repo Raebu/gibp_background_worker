@@ -1,0 +1,22 @@
+{
+  "name": "gibp-background-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run deploy:dry",
+    "db:migrate:local": "wrangler d1 migrations apply GROWTH_DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply GROWTH_DB --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "latest",
+    "typescript": "latest",
+    "vitest": "latest",
+    "wrangler": "latest"
+  }
+}

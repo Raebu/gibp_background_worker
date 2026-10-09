@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gibp-background-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-09",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "GROWTH_DB",
+      "database_name": "gibp-growth",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "vars": {
+    "SEND_MODE": "dry_run",
+    "FROM_EMAIL": "GIBP Commercial Desk <partnerships@gibp.global>",
+    "PUBLIC_BASE_URL": "https://growth.gibp.global",
+    "GIBP_SITE_URL": "https://www.gibp.global",
+    "AI_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "AI_DAILY_CALL_CAP": "30",
+    "DAILY_SEND_CAP": "50",
+    "DAILY_NEW_OUTREACH_CAP": "20",
+    "SERIOUS_THRESHOLD": "85",
+    "DEFAULT_JURISDICTION_MODE": "monitor_only",
+    "RETENTION_DAYS": "365"
+  }
+}

@@ -1,0 +1,12 @@
+# Required before SEND_MODE=live
+RESEND_API_KEY=re_...
+RESEND_WEBHOOK_SECRET=whsec_...
+UNSUBSCRIBE_SECRET=replace-with-32+-random-bytes
+ADMIN_TOKEN=replace-with-long-random-token
+BUSINESS_POSTAL_ADDRESS=Your legal postal address
+HANDOFF_TO=you@example.com
+
+# Recommended
+SITE_EVENT_TOKEN=replace-with-long-random-token
+HANDOFF_WEBHOOK_URL=
+GIBP_APPROVED_FACTS=GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money.
