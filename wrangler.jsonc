@@ -8,7 +8,9 @@
     "enabled": true
   },
   "triggers": {
-    "crons": ["0 * * * *"]
+    "crons": [
+      "0 * * * *"
+    ]
   },
   "queues": {
     "producers": [
@@ -51,6 +53,15 @@
     "RFP_HANDOFF_SCORE": "82",
     "SERIOUS_THRESHOLD": "85",
     "DEFAULT_JURISDICTION_MODE": "monitor_only",
-    "RETENTION_DAYS": "365"
-  }
+    "RETENTION_DAYS": "365",
+    "BUSINESS_POSTAL_ADDRESS": "82a James Carter Road, Bury St. Edmunds, IP28 7DE, United Kingdom",
+    "HANDOFF_TO": "martin@theraeburngroup.com",
+    "GIBP_APPROVED_FACTS": "GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money. GIBP presents responsible providers and applicable terms before any live regulated service. Public information is available at https://www.gibp.global."
+  },
+  "routes": [
+    {
+      "pattern": "growth.gibp.global",
+      "custom_domain": true
+    }
+  ]
 }
