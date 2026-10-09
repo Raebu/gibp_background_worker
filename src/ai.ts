@@ -47,7 +47,7 @@ export async function aiJson<T>(
   }
 }
 
-export async function classifyReply(env: Env, subject: string, body: string) {
+export async function classifyReply(env: Env, subject: string, body: string): Promise<ReplyClassification> {
   const lower = `${subject}\n${body}`.toLowerCase()
   const fallback: ReplyClassification = {
     intent: "other",
