@@ -172,3 +172,29 @@ export async function sendInternalResend(
   }
   return { id: data.id }
 }
+
+
+export async function recordSimulation(
+  env: Env,
+  conversationId: string,
+  subject: string,
+  text: string,
+  classification: string,
+  metadata: unknown = {},
+) {
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO messages
+      (id, conversation_id, direction, provider_id, message_id, subject, text, classification, metadata_json, created_at)
+     VALUES (?, ?, 'simulation', NULL, NULL, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id(),
+      conversationId,
+      subject,
+      text,
+      classification,
+      JSON.stringify(metadata),
+      nowIso(),
+    )
+    .run()
+}
