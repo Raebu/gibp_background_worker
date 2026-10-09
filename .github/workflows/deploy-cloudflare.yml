@@ -94,44 +94,17 @@ jobs:
 
           printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
 
-          ENDPOINT="$WORKER_URL/webhooks/resend"
+          RESEND_WEBHOOK_ID="27420d48-6618-4477-84a4-856fdb362045"
+
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $RESEND_API_KEY" \
             -H "Content-Type: application/json" \
-            https://api.resend.com/webhooks > /tmp/resend-webhooks.json
+            "https://api.resend.com/webhooks/$RESEND_WEBHOOK_ID" \
+            > /tmp/resend-webhook.json
 
-          SIGNING_SECRET="$(jq -r --arg endpoint "$ENDPOINT" '
-            ((.data // .webhooks // .) | if type=="array" then . else [] end)[]
-            | select(.endpoint == $endpoint)
-            | .signing_secret // empty
-          ' /tmp/resend-webhooks.json | head -1)"
-
-          if [ -z "$SIGNING_SECRET" ]; then
-            jq -n --arg endpoint "$ENDPOINT" '{
-              endpoint: $endpoint,
-              events: [
-                "email.received",
-                "email.delivered",
-                "email.opened",
-                "email.clicked",
-                "email.bounced",
-                "email.complained",
-                "email.suppressed",
-                "suppression.added"
-              ]
-            }' > /tmp/resend-create-webhook.json
-
-            curl --fail --silent --show-error \
-              -X POST \
-              -H "Authorization: Bearer $RESEND_API_KEY" \
-              -H "Content-Type: application/json" \
-              --data @/tmp/resend-create-webhook.json \
-              https://api.resend.com/webhooks > /tmp/resend-created-webhook.json
-
-            SIGNING_SECRET="$(jq -r '.signing_secret // .data.signing_secret // empty' /tmp/resend-created-webhook.json)"
-          fi
-
+          SIGNING_SECRET="$(jq -r '.signing_secret // .data.signing_secret // empty' /tmp/resend-webhook.json)"
           test -n "$SIGNING_SECRET"
+
           printf '%s' "$SIGNING_SECRET" | npx wrangler secret put RESEND_WEBHOOK_SECRET
 
           echo "Resend sending/receiving API access and signed webhook delivery are configured."
