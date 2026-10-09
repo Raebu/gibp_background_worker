@@ -20,6 +20,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_WEBHOOK_SECRET }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -82,32 +83,23 @@ jobs:
             openssl rand -hex 32 | npx wrangler secret put UNSUBSCRIBE_SECRET
           fi
 
-      - name: Bootstrap Resend integration when API key is available
+      - name: Bootstrap Resend integration
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -z "${RESEND_API_KEY:-}" ]; then
-            echo "RESEND_API_KEY is not configured in GitHub; skipping Resend bootstrap."
-            exit 0
-          fi
-
-          printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
-
-          RESEND_WEBHOOK_ID="27420d48-6618-4477-84a4-856fdb362045"
+          test -n "${RESEND_API_KEY:-}"
+          test -n "${RESEND_WEBHOOK_SECRET:-}"
 
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $RESEND_API_KEY" \
-            -H "Content-Type: application/json" \
-            "https://api.resend.com/webhooks/$RESEND_WEBHOOK_ID" \
-            > /tmp/resend-webhook.json
+            "https://api.resend.com/domains?limit=1" \
+            > /tmp/resend-auth-check.json
 
-          SIGNING_SECRET="$(jq -r '.signing_secret // .data.signing_secret // empty' /tmp/resend-webhook.json)"
-          test -n "$SIGNING_SECRET"
+          printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
+          printf '%s' "$RESEND_WEBHOOK_SECRET" | npx wrangler secret put RESEND_WEBHOOK_SECRET
 
-          printf '%s' "$SIGNING_SECRET" | npx wrangler secret put RESEND_WEBHOOK_SECRET
-
-          echo "Resend sending/receiving API access and signed webhook delivery are configured."
+          echo "Resend API access and signed webhook verification are configured."
 
       - name: Re-verify health after secret bootstrap
         shell: bash
