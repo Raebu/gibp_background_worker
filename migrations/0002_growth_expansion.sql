@@ -26,8 +26,7 @@ CREATE TABLE IF NOT EXISTS opportunities (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_source_external
-  ON opportunities(source, external_id)
-  WHERE external_id IS NOT NULL;
+  ON opportunities(source, external_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_opportunities_source_url
   ON opportunities(source, source_url)
