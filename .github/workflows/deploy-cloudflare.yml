@@ -19,6 +19,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -72,6 +73,76 @@ jobs:
             sleep 3
           done
           exit 1
+
+      - name: Ensure internal unsubscribe secret exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! npx wrangler secret list --json | jq -e '.[] | select(.name=="UNSUBSCRIBE_SECRET")' >/dev/null; then
+            openssl rand -hex 32 | npx wrangler secret put UNSUBSCRIBE_SECRET
+          fi
+
+      - name: Bootstrap Resend integration when API key is available
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RESEND_API_KEY:-}" ]; then
+            echo "RESEND_API_KEY is not configured in GitHub; skipping Resend bootstrap."
+            exit 0
+          fi
+
+          printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
+
+          ENDPOINT="$WORKER_URL/webhooks/resend"
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $RESEND_API_KEY" \
+            -H "Content-Type: application/json" \
+            https://api.resend.com/webhooks > /tmp/resend-webhooks.json
+
+          SIGNING_SECRET="$(jq -r --arg endpoint "$ENDPOINT" '
+            ((.data // .webhooks // .) | if type=="array" then . else [] end)[]
+            | select(.endpoint == $endpoint)
+            | .signing_secret // empty
+          ' /tmp/resend-webhooks.json | head -1)"
+
+          if [ -z "$SIGNING_SECRET" ]; then
+            jq -n --arg endpoint "$ENDPOINT" '{
+              endpoint: $endpoint,
+              events: [
+                "email.received",
+                "email.delivered",
+                "email.opened",
+                "email.clicked",
+                "email.bounced",
+                "email.complained",
+                "email.suppressed",
+                "suppression.added"
+              ]
+            }' > /tmp/resend-create-webhook.json
+
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer $RESEND_API_KEY" \
+              -H "Content-Type: application/json" \
+              --data @/tmp/resend-create-webhook.json \
+              https://api.resend.com/webhooks > /tmp/resend-created-webhook.json
+
+            SIGNING_SECRET="$(jq -r '.signing_secret // .data.signing_secret // empty' /tmp/resend-created-webhook.json)"
+          fi
+
+          test -n "$SIGNING_SECRET"
+          printf '%s' "$SIGNING_SECRET" | npx wrangler secret put RESEND_WEBHOOK_SECRET
+
+          echo "Resend sending/receiving API access and signed webhook delivery are configured."
+
+      - name: Re-verify health after secret bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "$WORKER_URL/health" | tee /tmp/post-secret-health.json
+          grep -q '"ok":true' /tmp/post-secret-health.json
+          grep -q '"mode":"dry_run"' /tmp/post-secret-health.json
 
       - name: Confirm deployment configuration remained dry-run
         run: |
