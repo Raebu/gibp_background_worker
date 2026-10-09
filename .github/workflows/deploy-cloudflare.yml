@@ -144,6 +144,37 @@ jobs:
           grep -q '"ok":true' /tmp/post-secret-health.json
           grep -q '"mode":"dry_run"' /tmp/post-secret-health.json
 
+      - name: Smoke-test autonomous queue execution
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npx wrangler queues info gibp-growth-jobs --json > /tmp/queue-info.json
+          QUEUE_ID="$(jq -r '.. | objects | (.queue_id? // .id? // empty)' /tmp/queue-info.json             | grep -E '^[0-9a-fA-F-]{36}             | head -1)"
+          test -n "$QUEUE_ID"
+
+          query_count() {
+            npx wrangler d1 execute GROWTH_DB --remote --json               --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='discovery';"               | jq '[.. | objects | .total? | numbers] | max // 0'
+          }
+
+          BEFORE="$(query_count)"
+
+          curl --fail --silent --show-error             -X POST             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"             -H "Content-Type: application/json"             --data '{"body":{"kind":"discovery"}}'             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues/$QUEUE_ID/messages"             > /tmp/queue-publish.json
+
+          jq -e '.success == true' /tmp/queue-publish.json >/dev/null
+
+          for attempt in $(seq 1 18); do
+            AFTER="$(query_count)"
+            if [ "$AFTER" -gt "$BEFORE" ]; then
+              echo "Autonomous discovery queue smoke test completed."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Timed out waiting for the discovery queue job to complete."
+          exit 1
+
       - name: Confirm deployment configuration remained dry-run
         run: |
           node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync("wrangler.jsonc","utf8"));if(c.vars.SEND_MODE!=="dry_run")process.exit(1)'
