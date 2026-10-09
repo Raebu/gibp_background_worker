@@ -3,6 +3,55 @@ import { handleResendEvent, importData, metrics, recordWebsiteIntent, runQueueJo
 import { isAuthorized, isSiteAuthorized, readUnsubscribeToken, verifyResendWebhook } from "./security"
 import { nowIso } from "./db"
 
+const WEBSITE_EVENT_WINDOW_MS = 10 * 60 * 1000
+const WEBSITE_EVENT_MAX_REQUESTS = 60
+const websiteEventBuckets = new Map<string, { count: number; resetAt: number }>()
+const websiteOrigins = new Set([
+  "https://gibp.global",
+  "https://www.gibp.global",
+  "https://gibp.app",
+  "https://www.gibp.app",
+])
+
+function requestIp(request: Request) {
+  return (
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  )
+}
+
+function allowedWebsiteOrigin(request: Request) {
+  const origin = request.headers.get("origin") || ""
+  return websiteOrigins.has(origin) ? origin : null
+}
+
+function websiteRateAllowed(request: Request) {
+  const now = Date.now()
+  const key = requestIp(request)
+  const current = websiteEventBuckets.get(key)
+
+  if (!current || current.resetAt <= now) {
+    websiteEventBuckets.set(key, { count: 1, resetAt: now + WEBSITE_EVENT_WINDOW_MS })
+    return true
+  }
+
+  if (current.count >= WEBSITE_EVENT_MAX_REQUESTS) return false
+  current.count += 1
+  return true
+}
+
+function websiteJson(data: unknown, status: number, origin: string | null) {
+  const response = json(data, status)
+  if (origin) {
+    response.headers.set("Access-Control-Allow-Origin", origin)
+    response.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS")
+    response.headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.set("Vary", "Origin")
+  }
+  return response
+}
+
 function json(data: unknown, status = 200) {
   return Response.json(data, {
     status,
@@ -164,11 +213,36 @@ export default {
       return json(await handleResendEvent(env, event))
     }
 
-    if (url.pathname === "/events/website" && request.method === "POST") {
-      if (!isSiteAuthorized(request, env)) return unauthorized()
+    if (url.pathname === "/events/website") {
+      const origin = allowedWebsiteOrigin(request)
+      const trusted = isSiteAuthorized(request, env)
+
+      if (request.method === "OPTIONS") {
+        if (!origin) return unauthorized()
+        return websiteJson({ ok: true }, 204, origin)
+      }
+
+      if (request.method !== "POST") {
+        return websiteJson({ error: "method_not_allowed" }, 405, origin)
+      }
+
+      if (!trusted && !origin) return unauthorized()
+      if (!trusted && !websiteRateAllowed(request)) {
+        return websiteJson({ error: "rate_limited" }, 429, origin)
+      }
+
+      const contentLength = Number(request.headers.get("content-length") || "0")
+      if (Number.isFinite(contentLength) && contentLength > 8192) {
+        return websiteJson({ error: "request_too_large" }, 413, origin)
+      }
+
       const body = await bodyJson(request)
-      if (!body) return json({ error: "invalid_json" }, 400)
-      return json(await recordWebsiteIntent(env, body))
+      if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
+      return websiteJson(
+        await recordWebsiteIntent(env, body, { trusted }),
+        200,
+        origin,
+      )
     }
 
     if (url.pathname === "/unsubscribe" && request.method === "GET") {
