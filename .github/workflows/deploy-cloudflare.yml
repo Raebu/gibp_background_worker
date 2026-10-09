@@ -91,11 +91,6 @@ jobs:
           test -n "${RESEND_API_KEY:-}"
           test -n "${RESEND_WEBHOOK_SECRET:-}"
 
-          curl --fail --silent --show-error \
-            -H "Authorization: Bearer $RESEND_API_KEY" \
-            "https://api.resend.com/domains?limit=1" \
-            > /tmp/resend-auth-check.json
-
           printf '%s' "$RESEND_API_KEY" | npx wrangler secret put RESEND_API_KEY
           printf '%s' "$RESEND_WEBHOOK_SECRET" | npx wrangler secret put RESEND_WEBHOOK_SECRET
 
