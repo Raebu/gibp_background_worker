@@ -1,5 +1,6 @@
 import type { Account, Contact, Env } from "./types"
 import { countToday } from "./db"
+import { currentNewOutreachCap } from "./ramp"
 
 const freeMailDomains = new Set([
   "gmail.com",
@@ -80,7 +81,7 @@ export async function canSendTo(
   if (sentToday >= dailyCap) return { allowed: false, reason: "daily_send_cap" }
 
   if (isInitial) {
-    const newCap = Number(env.DAILY_NEW_OUTREACH_CAP || 20)
+    const newCap = await currentNewOutreachCap(env)
     const newToday = await countToday(
       env,
       `SELECT COUNT(*) AS total FROM messages
