@@ -152,11 +152,11 @@ async function upsertDirectoryBank(
   if (!name || name.length < 2) return false
 
   const existing = await env.GROWTH_DB.prepare(
-    \`SELECT id FROM accounts
+    `SELECT id FROM accounts
      WHERE lower(name)=lower(?)
         OR lower(legal_name)=lower(?)
         OR (? IS NOT NULL AND lower(domain)=lower(?))
-     LIMIT 1\`,
+     LIMIT 1`,
   )
     .bind(name, name, domain, domain)
     .first<{ id: string }>()
@@ -168,10 +168,10 @@ async function upsertDirectoryBank(
 
   if (!existing) {
     await env.GROWTH_DB.prepare(
-      \`INSERT INTO accounts
+      `INSERT INTO accounts
         (id,name,legal_name,domain,country_code,account_type,pipeline,status,
          score,fit_score,source,source_url,research_json,created_at,updated_at)
-       VALUES (?,?,?,?,?,'bank','direct','candidate',?,?,?, ?,?,?,?)\`,
+       VALUES (?,?,?,?,?,'bank','direct','candidate',?,?,?, ?,?,?,?)`,
     )
       .bind(
         accountId,
@@ -194,30 +194,30 @@ async function upsertDirectoryBank(
       .run()
   } else {
     await env.GROWTH_DB.prepare(
-      \`UPDATE accounts SET
+      `UPDATE accounts SET
         domain=COALESCE(domain,?),
         country_code=COALESCE(country_code,?),
         fit_score=MAX(fit_score,?),
         updated_at=?
-       WHERE id=?\`,
+       WHERE id=?`,
     )
       .bind(domain, input.countryCode || null, fitScore, now, accountId)
       .run()
   }
 
   const signalUrl = input.sourceId
-    ? \`\${input.sourceUrl}#\${encodeURIComponent(input.sourceId)}\`
-    : \`\${input.sourceUrl}#\${encodeURIComponent(name)}\`
+    ? `${input.sourceUrl}#${encodeURIComponent(input.sourceId)}`
+    : `${input.sourceUrl}#${encodeURIComponent(name)}`
 
   await env.GROWTH_DB.prepare(
-    \`INSERT OR IGNORE INTO signals
+    `INSERT OR IGNORE INTO signals
       (id,account_id,kind,title,url,source,observed_at,strength,raw_json,created_at)
-     VALUES (?,?,'directory_presence',?,?,?, ?,?,?,?)\`,
+     VALUES (?,?,'directory_presence',?,?,?, ?,?,?,?)`,
   )
     .bind(
       id(),
       accountId,
-      \`Listed by \${input.source}\`,
+      `Listed by ${input.source}`,
       signalUrl,
       input.source,
       now,
@@ -324,7 +324,7 @@ async function discoverPraBanks(env: Env) {
 async function discoverWikidataBanks(env: Env) {
   const previousOffset = Number((await getSetting(env, "wikidata_bank_offset")) || 0)
   const offset = Number.isFinite(previousOffset) ? Math.max(0, previousOffset) : 0
-  const query = \`
+  const query = `
 SELECT ?item ?itemLabel ?website ?countryCode WHERE {
   ?item wdt:P31 wd:Q22687;
         wdt:P856 ?website.
@@ -336,8 +336,8 @@ SELECT ?item ?itemLabel ?website ?countryCode WHERE {
 }
 ORDER BY ?item
 LIMIT 100
-OFFSET \${offset}
-\`
+OFFSET ${offset}
+`
   const url = new URL("https://query.wikidata.org/sparql")
   url.searchParams.set("query", query)
   url.searchParams.set("format", "json")
