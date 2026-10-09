@@ -4,6 +4,7 @@ export interface AiBinding {
 
 export interface Env {
   GROWTH_DB: D1Database
+  GROWTH_QUEUE: Queue<GrowthJob>
   AI?: AiBinding
   SEND_MODE?: string
   FROM_EMAIL?: string
@@ -13,6 +14,9 @@ export interface Env {
   AI_DAILY_CALL_CAP?: string
   DAILY_SEND_CAP?: string
   DAILY_NEW_OUTREACH_CAP?: string
+  RAMP_START_CAP?: string
+  RFP_MIN_SCORE?: string
+  RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string
   DEFAULT_JURISDICTION_MODE?: string
   RETENTION_DAYS?: string
@@ -27,6 +31,7 @@ export interface Env {
   HANDOFF_WEBHOOK_URL?: string
   GIBP_APPROVED_FACTS?: string
   DISCOVERY_QUERY?: string
+  PARTNER_DISCOVERY_QUERY?: string
 }
 
 export interface Account {
@@ -36,6 +41,7 @@ export interface Account {
   domain: string | null
   country_code: string | null
   account_type: string
+  pipeline: string
   status: string
   score: number
   fit_score: number
@@ -49,6 +55,10 @@ export interface Account {
   next_action_at: string | null
   created_at: string
   updated_at: string
+}
+
+export interface GrowthJob {
+  kind: "discovery" | "procurement" | "research" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
