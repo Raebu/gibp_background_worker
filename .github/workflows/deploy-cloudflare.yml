@@ -104,6 +104,58 @@ jobs:
           grep -q '"ok":true' /tmp/post-secret-health.json
           grep -q '"mode":"dry_run"' /tmp/post-secret-health.json
 
+      - name: Verify signed Resend webhook path
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto = require("node:crypto")
+
+          const secret = process.env.RESEND_WEBHOOK_SECRET
+          const workerUrl = process.env.WORKER_URL
+          if (!secret || !workerUrl) process.exit(1)
+
+          const id = `smoke_${crypto.randomUUID()}`
+          const timestamp = Math.floor(Date.now() / 1000).toString()
+          const body = JSON.stringify({
+            type: "email.delivered",
+            created_at: new Date().toISOString(),
+            data: { email_id: `smoke_${crypto.randomUUID()}` }
+          })
+
+          const rawSecret = secret.startsWith("whsec_") ? secret.slice(6) : secret
+          const key = Buffer.from(rawSecret, "base64")
+          const signature = crypto
+            .createHmac("sha256", key)
+            .update(`${id}.${timestamp}.${body}`)
+            .digest("base64")
+
+          const response = await fetch(`${workerUrl}/webhooks/resend`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "svix-id": id,
+              "svix-timestamp": timestamp,
+              "svix-signature": `v1,${signature}`
+            },
+            body
+          })
+
+          const text = await response.text()
+          if (!response.ok) {
+            console.error(`Signed webhook smoke test failed with HTTP ${response.status}: ${text}`)
+            process.exit(1)
+          }
+
+          const payload = JSON.parse(text)
+          if (payload.ignored !== true) {
+            console.error("Signed webhook smoke test returned an unexpected payload.")
+            process.exit(1)
+          }
+
+          console.log("Signed Resend webhook verification passed.")
+          NODE
+
       - name: Smoke-test autonomous queue execution
         shell: bash
         run: |
