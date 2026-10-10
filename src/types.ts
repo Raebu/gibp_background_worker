@@ -59,7 +59,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
