@@ -2,6 +2,16 @@ import type { Env, GrowthJob } from "./types"
 import { handleResendEvent, importData, metrics, recordWebsiteIntent, runQueueJob, runTick } from "./engine"
 import { isAuthorized, isSiteAuthorized, readUnsubscribeToken, verifyResendWebhook } from "./security"
 import { nowIso } from "./db"
+import {
+  handleConversionRequest,
+  renderAssessment,
+  renderDashboard,
+  renderDashboardLogin,
+  renderInsight,
+  renderInsightsIndex,
+  renderPrivateBriefing,
+} from "./experience"
+import { recordCommercialOutcome } from "./learning"
 
 const WEBSITE_EVENT_WINDOW_MS = 10 * 60 * 1000
 const WEBSITE_EVENT_MAX_REQUESTS = 60
@@ -76,6 +86,69 @@ async function bodyJson(request: Request) {
 
 async function handleAdmin(request: Request, env: Env, path: string) {
   if (!isAuthorized(request, env)) return unauthorized()
+
+  if (path === "/admin/dossiers" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT d.*,a.name AS account_name,a.domain,a.country_code,a.score
+       FROM account_dossiers d JOIN accounts a ON a.id=d.account_id
+       ORDER BY d.confidence DESC,d.updated_at DESC LIMIT 100`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/stakeholders" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT s.*,a.name AS account_name
+       FROM account_stakeholders s JOIN accounts a ON a.id=s.account_id
+       ORDER BY s.influence_score DESC,s.updated_at DESC LIMIT 200`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/conversions" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT cr.*,a.name AS account_name,ct.name AS contact_name,ct.role
+       FROM conversion_requests cr
+       LEFT JOIN accounts a ON a.id=cr.account_id
+       LEFT JOIN contacts ct ON ct.id=cr.contact_id
+       ORDER BY cr.created_at DESC LIMIT 200`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/content" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM authority_briefings ORDER BY updated_at DESC LIMIT 100",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/learnings" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM commercial_learnings ORDER BY ABS(weight) DESC,sample_size DESC LIMIT 200",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/policies" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT jp.*,pe.source_title,pe.source_url,pe.reviewed_at,pe.review_due_at
+       FROM jurisdiction_policies jp
+       LEFT JOIN jurisdiction_policy_evidence pe ON pe.country_code=jp.country_code
+       ORDER BY jp.country_code`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/outcome" && request.method === "POST") {
+    const body = await bodyJson(request)
+    if (!body) return json({ error: "invalid_json" }, 400)
+    try {
+      return json(await recordCommercialOutcome(env, body))
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "invalid_outcome" }, 400)
+    }
+  }
 
   if (path === "/admin/status" && request.method === "GET") {
     return json({
@@ -158,12 +231,16 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
+      { kind: "dossiers" },
       { kind: "contacts" },
       { kind: "apollo_candidates" },
       { kind: "apollo_enrich" },
       { kind: "email_verify" },
       { kind: "conversations" },
+      { kind: "nurture" },
       { kind: "outreach" },
+      { kind: "authority" },
+      { kind: "learning" },
       { kind: "maintenance" },
     ]
     await env.GROWTH_QUEUE.sendBatch(jobs.map((body) => ({ body })))
@@ -203,7 +280,33 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         nowIso(),
       )
       .run()
-    return json({ ok: true })
+
+    const country = String(body.country_code).toUpperCase()
+    if (body.source_url && body.source_title) {
+      const reviewedAt = body.reviewed_at || nowIso()
+      const reviewDueAt =
+        body.review_due_at ||
+        new Date(new Date(reviewedAt).getTime() + 180 * 86400_000).toISOString()
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO jurisdiction_policy_evidence
+          (country_code,source_title,source_url,reviewed_at,review_due_at,notes)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(country_code) DO UPDATE SET
+          source_title=excluded.source_title,source_url=excluded.source_url,
+          reviewed_at=excluded.reviewed_at,review_due_at=excluded.review_due_at,
+          notes=excluded.notes`,
+      )
+        .bind(
+          country,
+          String(body.source_title).slice(0,300),
+          String(body.source_url).slice(0,1000),
+          String(reviewedAt),
+          String(reviewDueAt),
+          body.evidence_notes || null,
+        )
+        .run()
+    }
+    return json({ ok: true, country_code: country })
   }
 
   return json({ error: "not_found" }, 404)
@@ -215,6 +318,61 @@ export default {
 
     if (url.pathname === "/health") {
       return json({ ok: true, service: "gibp-background-worker", mode: env.SEND_MODE || "dry_run" })
+    }
+
+    if (url.pathname === "/dashboard/login" && request.method === "POST") {
+      const form = await request.formData()
+      const token = String(form.get("token") || "")
+      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+        return new Response("Invalid admin token.", { status: 401 })
+      }
+      return new Response(null, {
+        status: 303,
+        headers: {
+          Location: "/dashboard",
+          "Set-Cookie": `gibp_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`,
+          "Cache-Control": "no-store",
+        },
+      })
+    }
+
+    if (url.pathname === "/dashboard/logout") {
+      return new Response(null, {
+        status: 303,
+        headers: {
+          Location: "/dashboard",
+          "Set-Cookie": "gibp_admin=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
+          "Cache-Control": "no-store",
+        },
+      })
+    }
+
+    if (url.pathname === "/dashboard" && request.method === "GET") {
+      return isAuthorized(request, env) ? renderDashboard(env) : renderDashboardLogin()
+    }
+
+    if (url.pathname === "/briefing" && request.method === "GET") {
+      return renderPrivateBriefing(request, env)
+    }
+
+    if (url.pathname === "/briefing/request" && request.method === "POST") {
+      return handleConversionRequest(request, env)
+    }
+
+    if (url.pathname === "/insights" && request.method === "GET") {
+      return renderInsightsIndex(env)
+    }
+
+    if (url.pathname.startsWith("/insights/") && request.method === "GET") {
+      return renderInsight(env, decodeURIComponent(url.pathname.slice("/insights/".length)))
+    }
+
+    if (url.pathname.startsWith("/assessment/") && ["GET","POST"].includes(request.method)) {
+      return renderAssessment(
+        request,
+        env,
+        decodeURIComponent(url.pathname.slice("/assessment/".length)),
+      )
     }
 
     if (url.pathname.startsWith("/admin/")) {
@@ -299,10 +457,15 @@ export default {
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
+      { kind: "dossiers" },
       ...Array.from({ length: contactScans }, () => ({ kind: "contacts" as const })),
       { kind: "apollo_candidates" },
+      { kind: "email_verify" },
       { kind: "conversations" },
+      { kind: "nurture" },
       { kind: "outreach" },
+      { kind: "authority" },
+      { kind: "learning" },
       { kind: "maintenance" },
     ]
 
