@@ -159,6 +159,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "research" },
       { kind: "contacts" },
       { kind: "apollo_candidates" },
+      { kind: "apollo_enrich" },
       { kind: "conversations" },
       { kind: "outreach" },
       { kind: "maintenance" },
