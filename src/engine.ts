@@ -9,6 +9,21 @@ import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
 import { currentNewOutreachCap, maybeAdjustRamp } from "./ramp"
 import { verifyContactEmails } from "./quickemailverification"
+import {
+  buildAccountDossiers,
+  getQualificationProfile,
+  promotePolicyEligibleContacts,
+  recordReferralStakeholder,
+  updateQualification,
+} from "./intelligence"
+import {
+  markNurtureSent,
+  prepareNurture,
+  refreshNurtureSchedules,
+  requestMeetingBooking,
+  workingTimeDecision,
+} from "./lifecycle"
+import { generateAuthorityBriefings, recomputeCommercialLearnings } from "./learning"
 
 function addHours(hours: number) {
   return new Date(Date.now() + hours * 3600_000).toISOString()
@@ -257,6 +272,10 @@ async function makeOutreach(
     .bind(account.id)
     .all<{ title: string; url: string | null; strength: number }>()
 
+  const dossier = await env.GROWTH_DB.prepare(
+    "SELECT * FROM account_dossiers WHERE account_id=?",
+  ).bind(account.id).first<any>()
+
   const facts = approvedFacts(env)
   const pipeline = account.pipeline || "direct"
   const objective =
@@ -280,6 +299,7 @@ ${account.name}
 Type: ${account.account_type}
 Country: ${account.country_code || "unknown"}
 Research: ${account.research_json}
+Dossier: ${JSON.stringify(dossier || {})}
 Signals: ${JSON.stringify(signals.results || [])}
 Contact role/address: ${contact.role || ""} / ${contact.email}`
 
@@ -313,35 +333,43 @@ Contact role/address: ${contact.role || ""} / ${contact.email}`
     }
   }
 
-  const type = account.account_type.toLowerCase()
-  const landingPath =
-    pipeline === "partner"
-      ? "/partners"
-      : type.includes("bank")
-        ? "/solutions/banks"
-        : type.includes("payment")
-          ? "/solutions/payment-companies"
-          : type.includes("fintech")
-            ? "/solutions/fintech-platforms"
-            : type.includes("liquidity")
-              ? "/solutions/liquidity-providers"
-              : type.includes("settlement")
-                ? "/solutions/settlement-networks"
-                : type.includes("infrastructure")
-                  ? "/solutions/market-infrastructure"
-                  : "/solutions"
-
   const intentToken = await makeIntentToken(conversation.id, account.id, env)
-  const overviewUrl = new URL(landingPath, env.GIBP_SITE_URL || "https://www.gibp.global")
-  overviewUrl.searchParams.set("gi", intentToken)
+  const briefingUrl = new URL("/briefing", env.PUBLIC_BASE_URL || "https://growth.gibp.global")
+  briefingUrl.searchParams.set("gi", intentToken)
+
+  const publicOverview = new URL("/solutions", env.GIBP_SITE_URL || "https://www.gibp.global")
 
   return {
     subject: copy.subject,
-    text: `${copy.text.trim()}\n\nRelevant GIBP overview: ${overviewUrl.toString()}`,
+    text: `${copy.text.trim()}\n\nPrivate briefing prepared for ${account.name}: ${briefingUrl.toString()}\nPublic GIBP overview: ${publicOverview.toString()}`,
   }
 }
 
-async function processDueConversations(env: Env) {
+async function makeNurtureOutreach(
+  env: Env,
+  account: Account,
+  contact: Contact,
+  signal: { title: string; url?: string | null; kind?: string; strength?: number },
+) {
+  const generated = await aiJson<{ subject: string; text: string }>(
+    env,
+    "Write a concise, low-pressure institutional nurture email for GIBP. Return JSON only with subject and text. Do not invent facts or imply a relationship. Maximum 120 words.",
+    JSON.stringify({
+      account: account.name,
+      contact_role: contact.role,
+      new_public_signal: signal,
+      approved_facts: approvedFacts(env),
+      objective: "Share one genuinely relevant public development and ask whether the timing has changed. No generic chasing.",
+    }),
+  )
+  if (generated?.subject && generated.text) return generated
+  return {
+    subject: `A relevant update for ${account.name}`,
+    text: `Hello,\n\nA new public development caught our attention: ${signal.title}. I thought it was relevant to the institutional payments discussion we previously left open.\n\nIf this has changed the timing or priorities on your side, I am happy to pick the conversation back up. Otherwise, no action is needed.\n\nRegards,\nGIBP Commercial Desk`,
+  }
+}
+
+async function processDueConversationss(env: Env) {
   const due = await env.GROWTH_DB.prepare(
     `SELECT * FROM conversations
      WHERE state IN ('discovery','engaged','nurture')
@@ -359,6 +387,54 @@ async function processDueConversations(env: Env) {
     const account = await accountFor(env, conversation.account_id)
     const contact = await contactFor(env, conversation.contact_id)
     if (!account || !contact) continue
+
+    const timing = workingTimeDecision(contact, account)
+    if (!timing.allowed) {
+      await env.GROWTH_DB.prepare(
+        "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
+      ).bind(timing.next_action_at, nowIso(), conversation.id).run()
+      continue
+    }
+
+    if (conversation.state === "nurture") {
+      const nurture = await prepareNurture(env, conversation, contact)
+      if (!nurture.due || !nurture.signal) {
+        await env.GROWTH_DB.prepare(
+          "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
+        ).bind(nurture.next_action_at || daysFromNow(30), nowIso(), conversation.id).run()
+        continue
+      }
+
+      const copy = await makeNurtureOutreach(env, account, contact, nurture.signal)
+      const result = await sendResend(env, {
+        to: contact.email,
+        subject: copy.subject,
+        text: copy.text,
+        conversationId: conversation.id,
+        classification: "nurture",
+      })
+
+      if (result.dry_run) {
+        await recordSimulation(env, conversation.id, copy.subject, result.text, "nurture", {
+          dry_run: true,
+          signal: nurture.signal,
+        })
+        await env.GROWTH_DB.prepare(
+          "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
+        ).bind(daysFromNow(7), nowIso(), conversation.id).run()
+      } else {
+        await recordOutbound(
+          env, conversation.id, result.id, result.message_id, copy.subject, result.text, "nurture",
+          { dry_run: false, signal: nurture.signal },
+        )
+        await markNurtureSent(env, conversation.id, nurture.signal.observed_at || null)
+        await env.GROWTH_DB.prepare(
+          "UPDATE contacts SET last_contact_at=?,updated_at=? WHERE id=?",
+        ).bind(nowIso(), nowIso(), contact.id).run()
+      }
+      sent += 1
+      continue
+    }
 
     const isInitial = conversation.outbound_count === 0
     const decision = await canSendTo(env, account, contact, isInitial)
@@ -468,6 +544,17 @@ async function createHandoff(
     .bind(conversation.id)
     .all()
 
+  const qualification = await getQualificationProfile(env, conversation.id)
+  const dossier = await env.GROWTH_DB.prepare(
+    "SELECT * FROM account_dossiers WHERE account_id=?",
+  ).bind(account.id).first()
+  const stakeholders = await env.GROWTH_DB.prepare(
+    "SELECT name,role,email,source,influence_score,status FROM account_stakeholders WHERE account_id=? ORDER BY influence_score DESC LIMIT 20",
+  ).bind(account.id).all()
+  const meeting = await env.GROWTH_DB.prepare(
+    "SELECT status,booking_url,scheduled_at,created_at FROM meeting_requests WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1",
+  ).bind(conversation.id).first()
+
   const briefing = {
     account: {
       name: account.name,
@@ -484,6 +571,10 @@ async function createHandoff(
       email: contact.email,
     },
     conversation_score: conversation.score + classification.score_delta,
+    qualification,
+    dossier,
+    stakeholder_map: stakeholders.results || [],
+    meeting,
     reason: classification.summary,
     intent: classification.intent,
     transcript: messages.results || [],
@@ -545,6 +636,7 @@ async function autoReply(
   inboundMessageId?: string,
 ) {
   const facts = approvedFacts(env)
+  const qualification = await getQualificationProfile(env, conversation.id)
   const generated =
     (await aiJson<{ subject: string; text: string }>(
       env,
@@ -552,7 +644,7 @@ async function autoReply(
 Use ONLY approved facts. Never invent customers, pricing, contracts, security guarantees, regulatory status, integrations, SLAs, exclusivity or implementation dates.
 If the question cannot be answered from approved facts, say the team can cover it in a discussion.
 Maximum 170 words.`,
-      `Approved facts:\n${facts}\n\nClassification:\n${JSON.stringify(classification)}\n\nInbound subject: ${inboundSubject}\nInbound:\n${inboundText.slice(0, 7000)}`,
+      `Approved facts:\n${facts}\n\nQualification so far:\n${JSON.stringify(qualification || {})}\n\nClassification:\n${JSON.stringify(classification)}\n\nInbound subject: ${inboundSubject}\nInbound:\n${inboundText.slice(0, 7000)}`,
     )) || {
       subject: inboundSubject.toLowerCase().startsWith("re:") ? inboundSubject : `Re: ${inboundSubject}`,
       text:
@@ -581,11 +673,13 @@ Maximum 170 words.`,
     "auto_reply",
     { dry_run: result.dry_run },
   )
+  const replyState = classification.intent === "not_now" ? "nurture" : "engaged"
+  const nextAction = classification.intent === "not_now" ? daysFromNow(90) : daysFromNow(5)
   await env.GROWTH_DB.prepare(
     `UPDATE conversations SET outbound_count=outbound_count+1, message_count=message_count+1,
-      state='engaged', next_action_at=?, updated_at=? WHERE id=?`,
+      state=?, next_action_at=?, updated_at=? WHERE id=?`,
   )
-    .bind(daysFromNow(5), nowIso(), conversation.id)
+    .bind(replyState, nextAction, nowIso(), conversation.id)
     .run()
 }
 
@@ -653,6 +747,7 @@ export async function handleInboundEmail(env: Env, emailId: string) {
     .bind(newScore, newScore >= 35 ? "engaged" : conversation.state, nowIso(), conversation.id)
     .run()
   conversation.score = newScore
+  const qualification = await updateQualification(env, conversation, body, classification)
 
   if (classification.intent === "unsubscribe" || classification.intent === "negative") {
     if (classification.intent === "unsubscribe") {
@@ -672,8 +767,20 @@ export async function handleInboundEmail(env: Env, emailId: string) {
     return { matched: true, classification }
   }
 
+  if (classification.intent === "meeting_request") {
+    const account = await accountFor(env, conversation.account_id)
+    if (account) {
+      await requestMeetingBooking(env, conversation, account, contact, body)
+    }
+  }
+
   const threshold = Number(env.SERIOUS_THRESHOLD || 85)
-  if (classification.serious || classification.requires_human || newScore >= threshold) {
+  if (
+    classification.serious ||
+    classification.requires_human ||
+    newScore >= threshold ||
+    (qualification.completeness >= 70 && newScore >= 60)
+  ) {
     await createHandoff(env, conversation, classification)
     return { matched: true, classification, handoff: true }
   }
@@ -697,6 +804,12 @@ export async function handleInboundEmail(env: Env, emailId: string) {
         nowIso(),
       )
       .run()
+    await recordReferralStakeholder(env, {
+      account_id: contact.account_id,
+      email: referralEmail,
+      name: classification.referral_name || null,
+      source_key: `resend:${emailId}:${referralEmail}`,
+    })
   }
 
   if (classification.should_reply) {
@@ -1002,7 +1115,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "learning" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1033,6 +1146,8 @@ export async function runQueueJob(
     }
   } else if (kind === "research") {
     result = { researched: await processResearch(env) }
+  } else if (kind === "dossiers") {
+    result = await buildAccountDossiers(env)
   } else if (kind === "contacts") {
     result = await processContactDiscovery(env)
   } else if (kind === "apollo_candidates") {
@@ -1044,13 +1159,21 @@ export async function runQueueJob(
   } else if (kind === "apollo_enrich_commissioning_v2") {
     result = await runApolloEnrichmentCommissioningV2(env)
   } else if (kind === "email_verify") {
-    result = await verifyContactEmails(env)
+    const verification = await verifyContactEmails(env)
+    const promotion = await promotePolicyEligibleContacts(env)
+    result = { verification, promotion }
   } else if (kind === "email_verify_commissioning_v2") {
     result = await verifyContactEmails(env, 1)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
+  } else if (kind === "nurture") {
+    result = await refreshNurtureSchedules(env)
   } else if (kind === "outreach") {
     result = { sent: await processDueConversations(env) }
+  } else if (kind === "authority") {
+    result = await generateAuthorityBriefings(env)
+  } else if (kind === "learning") {
+    result = await recomputeCommercialLearnings(env)
   } else {
     result = {
       ramp: await maybeAdjustRamp(env),
@@ -1079,12 +1202,16 @@ export async function runTick(env: Env) {
   summary.discovery = await runQueueJob(env, "discovery")
   summary.procurement = await runQueueJob(env, "procurement")
   summary.research = await runQueueJob(env, "research")
+  summary.dossiers = await runQueueJob(env, "dossiers")
   summary.contacts = await runQueueJob(env, "contacts")
   summary.apollo_candidates = await runQueueJob(env, "apollo_candidates")
   summary.apollo_enrich = await runQueueJob(env, "apollo_enrich")
   summary.email_verify = await runQueueJob(env, "email_verify")
   summary.conversations = await runQueueJob(env, "conversations")
+  summary.nurture = await runQueueJob(env, "nurture")
   summary.outreach = await runQueueJob(env, "outreach")
+  summary.authority = await runQueueJob(env, "authority")
+  summary.learning = await runQueueJob(env, "learning")
   summary.maintenance = await runQueueJob(env, "maintenance")
 
   await setSetting(env, "last_tick_at", nowIso())
@@ -1098,12 +1225,17 @@ export async function metrics(env: Env) {
       (SELECT COUNT(*) FROM accounts) AS accounts,
       (SELECT COUNT(*) FROM accounts WHERE pipeline='partner') AS partner_accounts,
       (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
+      (SELECT COUNT(*) FROM account_dossiers) AS account_dossiers,
       (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_contact_candidates,
       (SELECT COUNT(*) FROM contact_email_verifications WHERE provider='quickemailverification' AND safe_to_send=1 AND verified_at >= datetime('now','-30 day')) AS qev_safe_contacts,
       (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='qev_verification_request' AND created_at >= datetime('now','start of day')) AS qev_requests_today,
       (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
       (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
       (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
+      (SELECT COUNT(*) FROM qualification_profiles WHERE completeness>=60) AS qualified_conversations,
+      (SELECT COUNT(*) FROM conversion_requests WHERE created_at>=datetime('now','-1 day')) AS conversions_24h,
+      (SELECT COUNT(*) FROM meeting_requests WHERE status='scheduled') AS scheduled_meetings,
+      (SELECT COUNT(*) FROM authority_briefings WHERE status='published') AS authority_briefings,
       (SELECT COUNT(*) FROM handoffs WHERE status='ready') AS ready_handoffs,
       (SELECT COUNT(*) FROM opportunities WHERE kind='rfp' AND status IN ('qualified','handoff')) AS qualified_rfps,
       (SELECT COUNT(*) FROM opportunity_handoffs WHERE status='ready') AS ready_procurement_handoffs,
