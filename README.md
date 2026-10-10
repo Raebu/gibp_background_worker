@@ -410,6 +410,7 @@ commercial outcomes
 - `GET|POST /assessment/liquidity-efficiency`
 - `GET /insights` and `GET /insights/:slug` — sourced public market briefings.
 - `GET /dashboard` — authenticated Autonomous Market Development Desk.
+- `POST /events/search` — signed ingestion for Search Console/search-demand signals so non-email acquisition feeds the same commercial brain.
 
 ### New administrative data
 
@@ -419,6 +420,8 @@ commercial outcomes
 - `GET /admin/content`
 - `GET /admin/learnings`
 - `GET /admin/policies`
+- `GET|POST /admin/evidence` — manage the approved fact/evidence library used by the SDR and RFP planner.
+- `GET /admin/search-demand`
 - `POST /admin/outcome` — record meeting/opportunity/proposal/win/loss/deferred/partner/RFP outcomes for closed-loop learning.
 
 ### Sender separation
