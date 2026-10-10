@@ -1,5 +1,5 @@
 import type { Account, Env } from "./types"
-import { audit, countToday, id, nowIso } from "./db"
+import { audit, countToday, getSetting, id, nowIso, setSetting } from "./db"
 import { isGenericRoleAddress } from "./compliance"
 
 const APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
@@ -220,12 +220,24 @@ export function apolloEnrichmentDailyCap(env: Env) {
   return Math.max(0, Math.min(5, Number(env.APOLLO_ENRICHMENT_DAILY_CAP || 0)))
 }
 
-export async function enrichTopApolloCandidate(env: Env) {
+export async function enrichTopApolloCandidate(env: Env, commissioningCap?: number) {
   if (!env.APOLLO_API_KEY) {
     return { attempted: 0, matched: 0, stored: 0, skipped: true, reason: "apollo_not_configured" }
   }
 
-  const dailyCap = apolloEnrichmentDailyCap(env)
+  const configuredCap = apolloEnrichmentDailyCap(env)
+  const isCommissioningOverride = commissioningCap !== undefined
+
+  if (isCommissioningOverride) {
+    if (env.SEND_MODE !== "dry_run" || configuredCap !== 0) {
+      return { attempted: 0, matched: 0, stored: 0, skipped: true, reason: "commissioning_guard" }
+    }
+  }
+
+  const dailyCap = isCommissioningOverride
+    ? Math.max(0, Math.min(2, Number(commissioningCap || 0)))
+    : configuredCap
+
   if (dailyCap <= 0) {
     return { attempted: 0, matched: 0, stored: 0, skipped: true, reason: "enrichment_disabled" }
   }
@@ -461,5 +473,78 @@ export async function enrichTopApolloCandidate(env: Env) {
       error: error instanceof Error ? error.message : "unknown",
     })
     throw error
+  }
+}
+
+
+const APOLLO_COMMISSIONING_ID = "apollo_email_v1"
+const APOLLO_COMMISSIONING_SETTING = "apollo_enrichment_commissioning_v1_complete"
+
+export async function runApolloEnrichmentCommissioningTest(env: Env) {
+  if (env.SEND_MODE !== "dry_run") {
+    return { skipped: true, reason: "send_mode_not_dry_run" }
+  }
+
+  if (apolloEnrichmentDailyCap(env) !== 0) {
+    return { skipped: true, reason: "persistent_enrichment_cap_must_remain_zero" }
+  }
+
+  const completed = await getSetting(env, APOLLO_COMMISSIONING_SETTING)
+  if (completed) {
+    return { skipped: true, reason: "already_completed", completed_at: completed }
+  }
+
+  const priorAttempts = await countToday(
+    env,
+    `SELECT COUNT(*) AS total
+     FROM audit_events
+     WHERE category='contacts'
+       AND action='apollo_commissioning_attempt'
+       AND entity_id=?`,
+    APOLLO_COMMISSIONING_ID,
+  )
+
+  if (priorAttempts >= 2) {
+    const completedAt = nowIso()
+    await setSetting(env, APOLLO_COMMISSIONING_SETTING, completedAt)
+    return { skipped: true, reason: "attempt_limit_already_reached", attempts: priorAttempts }
+  }
+
+  const results: Array<Record<string, unknown>> = []
+
+  for (let attempt = priorAttempts + 1; attempt <= 2; attempt += 1) {
+    await audit(env, "contacts", "apollo_commissioning_attempt", "commissioning", APOLLO_COMMISSIONING_ID, {
+      attempt,
+      max_attempts: 2,
+      persistent_cap: 0,
+      send_mode: "dry_run",
+    })
+
+    try {
+      results.push(await enrichTopApolloCandidate(env, 2))
+    } catch (error) {
+      await audit(env, "contacts", "apollo_commissioning_exception", "commissioning", APOLLO_COMMISSIONING_ID, {
+        attempt,
+        error: error instanceof Error ? error.message : "unknown",
+      })
+      results.push({ attempted: 1, matched: 0, stored: 0, failed: true, reason: "exception" })
+    }
+  }
+
+  const completedAt = nowIso()
+  await setSetting(env, APOLLO_COMMISSIONING_SETTING, completedAt)
+  await audit(env, "contacts", "apollo_commissioning_complete", "commissioning", APOLLO_COMMISSIONING_ID, {
+    attempts: 2,
+    results,
+    persistent_cap: 0,
+    send_mode: "dry_run",
+  })
+
+  return {
+    completed: true,
+    attempts: 2,
+    results,
+    persistent_cap: 0,
+    send_mode: "dry_run",
   }
 }
