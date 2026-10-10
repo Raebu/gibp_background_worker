@@ -15,6 +15,7 @@ export interface Env {
   DAILY_SEND_CAP?: string
   DAILY_NEW_OUTREACH_CAP?: string
   RAMP_START_CAP?: string
+  CONTACT_SCANS_PER_HOUR?: string
   RFP_MIN_SCORE?: string
   RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string

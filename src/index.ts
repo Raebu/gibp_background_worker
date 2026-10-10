@@ -270,12 +270,16 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const contactScans = Math.max(
+      1,
+      Math.min(12, Number(env.CONTACT_SCANS_PER_HOUR || 6)),
+    )
     const jobs: GrowthJob[] = [
       { kind: "directories" },
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
-      { kind: "contacts" },
+      ...Array.from({ length: contactScans }, () => ({ kind: "contacts" as const })),
       { kind: "conversations" },
       { kind: "outreach" },
       { kind: "maintenance" },
