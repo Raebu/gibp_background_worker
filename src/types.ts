@@ -17,6 +17,7 @@ export interface Env {
   RAMP_START_CAP?: string
   CONTACT_SCANS_PER_HOUR?: string
   APOLLO_CANDIDATE_SEARCHES_PER_HOUR?: string
+  APOLLO_ENRICHMENT_DAILY_CAP?: string
   RFP_MIN_SCORE?: string
   RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string
@@ -62,7 +63,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
