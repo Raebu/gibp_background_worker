@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
-import fs from "node:fs"
+declare const require: (name: string) => { readFileSync(path: string, encoding: string): string }
+const fs = require("fs")
 
 describe("contact email upserts", () => {
   it("use targetless UPSERT with the lower(email) unique expression index", () => {
