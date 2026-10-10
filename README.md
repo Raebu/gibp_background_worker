@@ -15,6 +15,7 @@ The first production-oriented build contains:
 - **Procurement/RFP discovery** using global GDELT tender signals plus official UK Contracts Finder and Find a Tender OCDS feeds.
 - **Free organisation enrichment** using Wikidata and GLEIF before any paid enrichment is considered.
 - **Public-contact discovery** from official company websites only; it does not guess email addresses.
+- **Optional Apollo candidate discovery** using the 0-credit People Search endpoint to persist named senior prospects with verified-email availability, while keeping paid enrichment completely disabled until explicitly approved.
 - **Robots.txt-aware crawling** with strict page/subrequest limits.
 - **Account research/scoring** using Cloudflare Workers AI when available, with deterministic fallbacks.
 - **Compliance-by-jurisdiction**. Unknown jurisdictions default to monitor-only rather than "send everywhere".
@@ -79,6 +80,7 @@ The architecture is intentionally serverless and scale-to-zero:
 - Cloudflare Workers AI for limited research/copy/classification. The engine enforces an independent daily AI-call cap.
 - Resend for sending and receiving.
 - GDELT, Wikidata and GLEIF for free public discovery/enrichment.
+- Optional Apollo People Search for zero-credit candidate discovery. Paid people enrichment is deliberately not implemented in the autonomous Worker.
 - No paid CRM, vector database, queue cluster or always-on VM is required.
 
 Paid data providers can later be added behind adapters without changing the state machine.
@@ -158,7 +160,10 @@ Optional:
 ```bash
 npx wrangler secret put HANDOFF_WEBHOOK_URL
 npx wrangler secret put GIBP_APPROVED_FACTS
+npx wrangler secret put APOLLO_API_KEY
 ```
+
+`APOLLO_API_KEY` is optional. When present, the Worker uses only Apollo People Search (`/mixed_people/api_search`) and stores candidate metadata in D1. It does not call Apollo people-enrichment endpoints or spend enrichment credits.
 
 ### 4. Deploy in dry-run mode
 
@@ -259,6 +264,7 @@ Recommended event weights already exist for trust, security, regulatory, archite
 - `GET /admin/status` — engine/config/CRM metrics.
 - `GET /admin/handoffs` — serious sales and procurement opportunities only.
 - `GET /admin/opportunities` — current qualified/monitored procurement opportunities.
+- `GET /admin/contact-candidates` — persisted zero-credit Apollo decision-maker candidates awaiting any separately approved enrichment step.
 - `POST /admin/enqueue` — enqueue the normal autonomous background phases.
 - `POST /admin/run` — manually run all phases synchronously for diagnostics.
 - `POST /admin/import` — import accounts/contacts.
@@ -298,7 +304,7 @@ The architecture is intentionally ready for:
 - additional official procurement sources beyond the UK/global-signal layer;
 - formal partner-program directory discovery;
 - event/conference intelligence;
-- optional Apollo or other enrichment provider;
+- explicitly approved Apollo people enrichment from the persisted candidate queue;
 - meeting-calendar booking after qualification;
 - private per-account briefing pages;
 - GIBP website campaign tokens;
