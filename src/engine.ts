@@ -8,6 +8,7 @@ import { fetchReceivedEmail, recordOutbound, recordSimulation, sendInternalResen
 import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
 import { currentNewOutreachCap, maybeAdjustRamp } from "./ramp"
+import { verifyContactEmails } from "./quickemailverification"
 
 function addHours(hours: number) {
   return new Date(Date.now() + hours * 3600_000).toISOString()
@@ -1001,7 +1002,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "email_verify" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1040,6 +1041,8 @@ export async function runQueueJob(
     result = await enrichTopApolloCandidate(env)
   } else if (kind === "apollo_enrich_commissioning") {
     result = await runApolloEnrichmentCommissioningTest(env)
+  } else if (kind === "email_verify") {
+    result = await verifyContactEmails(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
@@ -1075,6 +1078,7 @@ export async function runTick(env: Env) {
   summary.contacts = await runQueueJob(env, "contacts")
   summary.apollo_candidates = await runQueueJob(env, "apollo_candidates")
   summary.apollo_enrich = await runQueueJob(env, "apollo_enrich")
+  summary.email_verify = await runQueueJob(env, "email_verify")
   summary.conversations = await runQueueJob(env, "conversations")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.maintenance = await runQueueJob(env, "maintenance")
@@ -1091,6 +1095,8 @@ export async function metrics(env: Env) {
       (SELECT COUNT(*) FROM accounts WHERE pipeline='partner') AS partner_accounts,
       (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
       (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_contact_candidates,
+      (SELECT COUNT(*) FROM contact_email_verifications WHERE provider='quickemailverification' AND safe_to_send=1 AND verified_at >= datetime('now','-30 day')) AS qev_safe_contacts,
+      (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='qev_verification_request' AND created_at >= datetime('now','start of day')) AS qev_requests_today,
       (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
       (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
       (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
