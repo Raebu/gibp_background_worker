@@ -79,6 +79,7 @@ The architecture is intentionally serverless and scale-to-zero:
 - Cloudflare D1 for the CRM/state machine.
 - Cloudflare Workers AI for limited research/copy/classification. The engine enforces an independent daily AI-call cap.
 - Resend for sending and receiving.
+- Apollo is optional. People Search is used as the zero-credit candidate layer; standard person matching is capped independently and never reveals phone/personal email.
 - GDELT, Wikidata and GLEIF for free public discovery/enrichment.
 - Optional Apollo People Search for zero-credit candidate discovery. Paid people enrichment is deliberately not implemented in the autonomous Worker.
 - No paid CRM, vector database, queue cluster or always-on VM is required.
@@ -114,6 +115,7 @@ This is intentional. Global discovery can be automatic while email policy remain
 ## Default sending limits
 
 - `SEND_MODE=dry_run`
+- `APOLLO_ENRICHMENT_DAILY_CAP=0` until explicitly commissioned
 - 50 total outbound messages/day
 - 5 new first-contact messages/day initially
 - automatic reputation ramp up to a configured ceiling of 20 new first contacts/day
@@ -312,3 +314,23 @@ The architecture is intentionally ready for:
 - a lightweight internal serious-opportunity dashboard.
 
 The core rule remains: **the machine handles the pipeline; a human appears only when a serious conversation or binding decision begins.**
+
+
+## Apollo enrichment commissioning
+
+Apollo People Search can populate named senior candidates without revealing their email address. The separate standard person-match layer is intentionally disabled in production by default.
+
+When enabled later:
+
+- one candidate is processed per queue invocation;
+- the daily cap is clamped to at most 5;
+- standard work-email match only;
+- no phone reveal;
+- no personal-email reveal;
+- no waterfall enrichment;
+- the returned work email must be Apollo-verified;
+- the address must match the target organisation's corporate domain;
+- generic role inboxes are rejected;
+- matched records are stored as `research_only`, not `active`, so enrichment alone cannot trigger outreach.
+
+This gives a second commissioning gate between paying for contact data and authorising that data for outreach.
