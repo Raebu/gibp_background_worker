@@ -67,47 +67,78 @@ async function processResearch(env: Env) {
 }
 
 async function processContactDiscovery(env: Env) {
-  const result = await env.GROWTH_DB.prepare(
-    `SELECT a.*
-     FROM accounts a
-     JOIN jurisdiction_policies jp
-       ON jp.country_code=upper(COALESCE(a.country_code,''))
-     WHERE a.domain IS NOT NULL
-       AND a.domain != ''
-       AND a.status IN ('qualified','candidate','monitor','research')
-       AND jp.allowed=1
-       AND jp.requires_consent=0
-       AND jp.allow_corporate_b2b=1
-       AND NOT EXISTS (
-         SELECT 1
-         FROM contacts ct
-         WHERE ct.account_id=a.id
-           AND ct.status='active'
-           AND ct.name IS NOT NULL
-           AND length(trim(ct.name)) > 0
-       )
-       AND NOT EXISTS (
-         SELECT 1
-         FROM audit_events ae
-         WHERE ae.category='contacts'
-           AND ae.action='public_scan_v2'
-           AND ae.entity_id=a.id
-           AND ae.created_at >= datetime('now','-7 day')
-       )
-     ORDER BY CASE a.status WHEN 'qualified' THEN 0 ELSE 1 END,
-              a.score DESC,
-              a.updated_at ASC
-     LIMIT 2`,
-  ).all<Account>()
+  const now = nowIso()
+  const lockUntil = addHours(0.25)
 
-  let scanned = 0
-  let contacts = 0
-  for (const account of result.results || []) {
-    if (!account.domain) continue
-    contacts += await crawlPublicContacts(env, account.id, account.domain, account.country_code)
-    scanned += 1
+  const account = await env.GROWTH_DB.prepare(
+    `UPDATE accounts
+     SET next_action_at=?, updated_at=?
+     WHERE id=(
+       SELECT a.id
+       FROM accounts a
+       JOIN jurisdiction_policies jp
+         ON jp.country_code=upper(COALESCE(a.country_code,''))
+       WHERE a.domain IS NOT NULL
+         AND a.domain != ''
+         AND a.status IN ('qualified','candidate','monitor','research')
+         AND jp.allowed=1
+         AND jp.requires_consent=0
+         AND jp.allow_corporate_b2b=1
+         AND (a.next_action_at IS NULL OR a.next_action_at <= ?)
+         AND NOT EXISTS (
+           SELECT 1
+           FROM contacts ct
+           WHERE ct.account_id=a.id
+             AND ct.status='active'
+             AND ct.name IS NOT NULL
+             AND length(trim(ct.name)) > 0
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM audit_events ae
+           WHERE ae.category='contacts'
+             AND ae.action='public_scan_v2'
+             AND ae.entity_id=a.id
+             AND ae.created_at >= datetime('now','-7 day')
+         )
+       ORDER BY
+         CASE
+           WHEN a.source='fdic_bankfind' AND a.fit_score BETWEEN 82 AND 90 THEN 0
+           WHEN a.status='qualified' THEN 1
+           WHEN a.source='fdic_bankfind' THEN 2
+           ELSE 3
+         END,
+         a.score DESC,
+         a.updated_at ASC
+       LIMIT 1
+     )
+     RETURNING *`,
+  )
+    .bind(lockUntil, now, now)
+    .first<Account>()
+
+  if (!account?.domain) return { scanned: 0, contacts: 0 }
+
+  try {
+    const contacts = await crawlPublicContacts(
+      env,
+      account.id,
+      account.domain,
+      account.country_code,
+    )
+    return {
+      scanned: 1,
+      contacts,
+      account_id: account.id,
+      domain: account.domain,
+    }
+  } finally {
+    await env.GROWTH_DB.prepare(
+      "UPDATE accounts SET next_action_at=NULL, updated_at=? WHERE id=?",
+    )
+      .bind(nowIso(), account.id)
+      .run()
   }
-  return { scanned, contacts }
 }
 
 async function ensureConversations(env: Env) {
