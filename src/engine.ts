@@ -369,7 +369,7 @@ async function makeNurtureOutreach(
   }
 }
 
-async function processDueConversationss(env: Env) {
+async function processDueConversations(env: Env) {
   const due = await env.GROWTH_DB.prepare(
     `SELECT * FROM conversations
      WHERE state IN ('discovery','engaged','nurture')
@@ -663,16 +663,27 @@ Maximum 170 words.`,
       ? { "In-Reply-To": inboundMessageId, References: inboundMessageId }
       : undefined,
   })
-  await recordOutbound(
-    env,
-    conversation.id,
-    result.id,
-    result.message_id,
-    generated.subject,
-    result.text,
-    "auto_reply",
-    { dry_run: result.dry_run },
-  )
+  if (result.dry_run) {
+    await recordSimulation(
+      env,
+      conversation.id,
+      generated.subject,
+      result.text,
+      "auto_reply",
+      { dry_run: true },
+    )
+  } else {
+    await recordOutbound(
+      env,
+      conversation.id,
+      result.id,
+      result.message_id,
+      generated.subject,
+      result.text,
+      "auto_reply",
+      { dry_run: false },
+    )
+  }
   const replyState = classification.intent === "not_now" ? "nurture" : "engaged"
   const nextAction = classification.intent === "not_now" ? daysFromNow(90) : daysFromNow(5)
   await env.GROWTH_DB.prepare(
