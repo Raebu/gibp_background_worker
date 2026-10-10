@@ -122,6 +122,21 @@ async function handleAdmin(request: Request, env: Env, path: string) {
     })
   }
 
+  if (path === "/admin/contact-candidates" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT cc.id,cc.provider,cc.provider_person_id,cc.first_name,cc.last_name_display,
+              cc.title,cc.organization_name,cc.score,cc.email_available,cc.email_status_filter,
+              cc.status,cc.created_at,cc.updated_at,
+              a.id AS account_id,a.name AS account_name,a.domain,a.country_code
+       FROM contact_candidates cc
+       JOIN accounts a ON a.id=cc.account_id
+       WHERE cc.status='candidate'
+       ORDER BY cc.score DESC, cc.updated_at DESC
+       LIMIT 200`,
+    ).all()
+    return json(rows.results || [])
+  }
+
   if (path === "/admin/opportunities" && request.method === "GET") {
     const rows = await env.GROWTH_DB.prepare(
       `SELECT id,kind,title,source,source_url,buyer_name,country_code,deadline,
