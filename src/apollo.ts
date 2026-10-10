@@ -256,7 +256,7 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
   }
 
   const dailyCap = isCommissioningOverride
-    ? Math.max(0, Math.min(2, Number(commissioningCap || 0)))
+    ? Math.max(0, Math.min(3, Number(commissioningCap || 0)))
     : configuredCap
 
   if (dailyCap <= 0) {
@@ -574,6 +574,84 @@ export async function runApolloEnrichmentCommissioningTest(env: Env) {
     attempts: 2,
     results,
     persistent_cap: 0,
+    send_mode: "dry_run",
+  }
+}
+
+
+const APOLLO_COMMISSIONING_V2_ID = "apollo_email_v2"
+const APOLLO_COMMISSIONING_V2_SETTING = "apollo_enrichment_commissioning_v2_complete"
+
+export async function runApolloEnrichmentCommissioningV2(env: Env) {
+  if (env.SEND_MODE !== "dry_run") {
+    return { skipped: true, reason: "send_mode_not_dry_run" }
+  }
+
+  if (apolloEnrichmentDailyCap(env) !== 0) {
+    return { skipped: true, reason: "persistent_enrichment_cap_must_remain_zero" }
+  }
+
+  const completed = await getSetting(env, APOLLO_COMMISSIONING_V2_SETTING)
+  if (completed) {
+    return { skipped: true, reason: "already_completed", completed_at: completed }
+  }
+
+  const spendToday = await countToday(
+    env,
+    `SELECT COUNT(*) AS total
+     FROM audit_events
+     WHERE category='contacts'
+       AND action='apollo_enrichment_spend'
+       AND created_at >= datetime('now','start of day')`,
+  )
+
+  if (spendToday !== 2) {
+    return {
+      skipped: true,
+      reason: "unexpected_existing_spend",
+      expected_spend_today: 2,
+      actual_spend_today: spendToday,
+    }
+  }
+
+  await audit(env, "contacts", "apollo_commissioning_attempt", "commissioning", APOLLO_COMMISSIONING_V2_ID, {
+    attempt: 1,
+    max_attempts: 1,
+    persistent_cap: 0,
+    absolute_daily_ceiling: 3,
+    send_mode: "dry_run",
+  })
+
+  let result: Record<string, unknown>
+  try {
+    result = await enrichTopApolloCandidate(env, 3)
+  } catch (error) {
+    result = {
+      attempted: 1,
+      matched: 0,
+      stored: 0,
+      failed: true,
+      reason: "exception",
+      error: error instanceof Error ? error.message : "unknown",
+    }
+  }
+
+  const completedAt = nowIso()
+  await setSetting(env, APOLLO_COMMISSIONING_V2_SETTING, completedAt)
+  await audit(env, "contacts", "apollo_commissioning_complete", "commissioning", APOLLO_COMMISSIONING_V2_ID, {
+    attempts: 1,
+    result,
+    persistent_cap: 0,
+    absolute_daily_ceiling: 3,
+    send_mode: "dry_run",
+  })
+
+  return {
+    completed: true,
+    attempts: 1,
+    result,
+    persistent_cap: 0,
+    absolute_daily_ceiling: 3,
     send_mode: "dry_run",
   }
 }

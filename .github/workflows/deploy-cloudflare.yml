@@ -474,6 +474,158 @@ jobs:
           echo "Timed out waiting for Apollo enrichment commissioning test."
           exit 1
 
+      - name: Commission one additional Apollo credit on a different account
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          completed_count() {
+            npx wrangler d1 execute GROWTH_DB --remote --json \
+              --command "SELECT COUNT(*) AS total FROM settings WHERE key='apollo_enrichment_commissioning_v2_complete';" \
+              | jq '[.. | objects | .total? | numbers] | max // 0'
+          }
+
+          if [ "$(completed_count)" -gt 0 ]; then
+            echo "Apollo one-credit v2 commissioning already completed."
+          else
+            curl --fail --silent --show-error \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues" \
+              > /tmp/apollo-v2-queues.json
+
+            QUEUE_ID="$(jq -r '.result[] | select(.queue_name=="gibp-growth-jobs") | .queue_id' /tmp/apollo-v2-queues.json | head -1)"
+            test -n "$QUEUE_ID"
+
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{"body":{"kind":"apollo_enrich_commissioning_v2"}}' \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues/$QUEUE_ID/messages" \
+              > /tmp/apollo-v2-publish.json
+
+            jq -e '.success == true' /tmp/apollo-v2-publish.json >/dev/null
+
+            for attempt in $(seq 1 24); do
+              if [ "$(completed_count)" -gt 0 ]; then
+                echo "Apollo one-credit v2 commissioning completed."
+                break
+              fi
+              sleep 5
+            done
+
+            if [ "$(completed_count)" -eq 0 ]; then
+              echo "Timed out waiting for Apollo one-credit v2 commissioning."
+              exit 1
+            fi
+          fi
+
+          npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT action,entity_id,detail_json,created_at
+            FROM audit_events
+            WHERE category='contacts'
+              AND entity_id='apollo_email_v2'
+            ORDER BY created_at ASC;
+          " | tee /tmp/apollo-v2-result.json
+
+      - name: Verify the newly enriched email with QuickEmailVerification
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${QUICKEMAILVERIFICATION_API_KEY:-}" ]; then
+            echo "QuickEmailVerification key missing after successful bootstrap."
+            exit 1
+          fi
+
+          qev_complete_count() {
+            npx wrangler d1 execute GROWTH_DB --remote --json \
+              --command "SELECT COUNT(*) AS total FROM settings WHERE key='qev_commissioning_v2_complete';" \
+              | jq '[.. | objects | .total? | numbers] | max // 0'
+          }
+
+          if [ "$(qev_complete_count)" -gt 0 ]; then
+            echo "QEV v2 follow-up already completed."
+            exit 0
+          fi
+
+          stored_count() {
+            npx wrangler d1 execute GROWTH_DB --remote --json \
+              --command "SELECT COUNT(*) AS total
+                         FROM contacts ct
+                         WHERE ct.email_source='apollo_verified'
+                           AND ct.status='research_only'
+                           AND ct.created_at >= datetime('now','-10 minute');" \
+              | jq '[.. | objects | .total? | numbers] | max // 0'
+          }
+
+          if [ "$(stored_count)" -eq 0 ]; then
+            echo "Apollo did not store a new research-only work email; no QEV production verification is needed."
+            npx wrangler d1 execute GROWTH_DB --remote --json --command "
+              INSERT INTO settings (key,value,updated_at)
+              VALUES ('qev_commissioning_v2_complete','no_new_email',datetime('now'))
+              ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+            " >/dev/null
+            exit 0
+          fi
+
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues" \
+            > /tmp/qev-v2-queues.json
+
+          QUEUE_ID="$(jq -r '.result[] | select(.queue_name=="gibp-growth-jobs") | .queue_id' /tmp/qev-v2-queues.json | head -1)"
+          test -n "$QUEUE_ID"
+
+          BEFORE="$(npx wrangler d1 execute GROWTH_DB --remote --json \
+            --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='email_verify_commissioning_v2';" \
+            | jq '[.. | objects | .total? | numbers] | max // 0')"
+
+          curl --fail --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"body":{"kind":"email_verify_commissioning_v2"}}' \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues/$QUEUE_ID/messages" \
+            > /tmp/qev-v2-publish.json
+
+          jq -e '.success == true' /tmp/qev-v2-publish.json >/dev/null
+
+          for attempt in $(seq 1 24); do
+            AFTER="$(npx wrangler d1 execute GROWTH_DB --remote --json \
+              --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='email_verify_commissioning_v2';" \
+              | jq '[.. | objects | .total? | numbers] | max // 0')"
+            if [ "$AFTER" -gt "$BEFORE" ]; then
+              npx wrangler d1 execute GROWTH_DB --remote --json --command "
+                INSERT INTO settings (key,value,updated_at)
+                VALUES ('qev_commissioning_v2_complete','verified_once',datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+              " >/dev/null
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "$(qev_complete_count)" -eq 0 ]; then
+            echo "Timed out waiting for one-contact QEV verification."
+            exit 1
+          fi
+
+          npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT
+              (SELECT COUNT(*) FROM audit_events
+                WHERE category='contacts'
+                  AND action='qev_verification_request'
+                  AND created_at >= datetime('now','start of day')) AS qev_requests_today,
+              (SELECT COUNT(*) FROM contact_email_verifications
+                WHERE provider='quickemailverification'
+                  AND verified_at >= datetime('now','-10 minute')) AS qev_recent_results,
+              (SELECT COUNT(*) FROM contact_email_verifications
+                WHERE provider='quickemailverification'
+                  AND safe_to_send=1
+                  AND verified_at >= datetime('now','-10 minute')) AS qev_recent_safe;
+          " | tee /tmp/qev-v2-result.json
+
       - name: Commission one-time QuickEmailVerification batch
         shell: bash
         run: |
