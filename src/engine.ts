@@ -1,4 +1,5 @@
 import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
+import { discoverApolloContactCandidates } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
@@ -139,6 +140,76 @@ async function processContactDiscovery(env: Env) {
       .bind(nowIso(), account.id)
       .run()
   }
+}
+
+async function processApolloCandidateDiscovery(env: Env) {
+  if (!env.APOLLO_API_KEY) {
+    return { searched: 0, stored: 0, skipped: true, reason: "apollo_not_configured" }
+  }
+
+  const limit = Math.max(
+    1,
+    Math.min(10, Number(env.APOLLO_CANDIDATE_SEARCHES_PER_HOUR || 3)),
+  )
+
+  const result = await env.GROWTH_DB.prepare(
+    `SELECT a.*
+     FROM accounts a
+     JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
+     WHERE a.domain IS NOT NULL
+       AND a.domain != ''
+       AND a.status IN ('qualified','candidate','monitor','research')
+       AND jp.allowed=1
+       AND jp.requires_consent=0
+       AND jp.allow_corporate_b2b=1
+       AND NOT EXISTS (
+         SELECT 1
+         FROM contacts ct
+         WHERE ct.account_id=a.id
+           AND ct.status='active'
+           AND ct.name IS NOT NULL
+           AND length(trim(ct.name)) > 0
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM audit_events ae
+         WHERE ae.category='contacts'
+           AND ae.action='apollo_candidate_search'
+           AND ae.entity_id=a.id
+           AND ae.created_at >= datetime('now','-7 day')
+       )
+     ORDER BY
+       CASE
+         WHEN a.status='qualified' THEN 0
+         WHEN a.source='fdic_bankfind' AND a.fit_score BETWEEN 82 AND 90 THEN 1
+         WHEN a.source='fdic_bankfind' THEN 2
+         ELSE 3
+       END,
+       a.score DESC,
+       a.updated_at ASC
+     LIMIT ?`,
+  )
+    .bind(limit)
+    .all<Account>()
+
+  let searched = 0
+  let stored = 0
+  const accounts: Array<{ id: string; domain: string; stored: number }> = []
+
+  for (const account of result.results || []) {
+    if (!account.domain) continue
+    const outcome = await discoverApolloContactCandidates(env, account)
+    searched += Number(outcome.searched || 0)
+    stored += Number(outcome.stored || 0)
+    accounts.push({
+      id: account.id,
+      domain: account.domain,
+      stored: Number(outcome.stored || 0),
+    })
+  }
+
+  return { searched, stored, accounts }
 }
 
 async function ensureConversations(env: Env) {
@@ -930,7 +1001,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -963,6 +1034,8 @@ export async function runQueueJob(
     result = { researched: await processResearch(env) }
   } else if (kind === "contacts") {
     result = await processContactDiscovery(env)
+  } else if (kind === "apollo_candidates") {
+    result = await processApolloCandidateDiscovery(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
@@ -996,6 +1069,7 @@ export async function runTick(env: Env) {
   summary.procurement = await runQueueJob(env, "procurement")
   summary.research = await runQueueJob(env, "research")
   summary.contacts = await runQueueJob(env, "contacts")
+  summary.apollo_candidates = await runQueueJob(env, "apollo_candidates")
   summary.conversations = await runQueueJob(env, "conversations")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.maintenance = await runQueueJob(env, "maintenance")
