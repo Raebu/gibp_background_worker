@@ -22,6 +22,7 @@ jobs:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_WEBHOOK_SECRET }}
       APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+      QUICKEMAILVERIFICATION_API_KEY: ${{ secrets.QUICKEMAILVERIFICATION_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -129,6 +130,35 @@ jobs:
           else
             echo "APOLLO_API_KEY is not configured; candidate discovery will skip safely."
           fi
+
+      - name: Sync optional QuickEmailVerification secret
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${QUICKEMAILVERIFICATION_API_KEY:-}" ]; then
+            printf '%s' "$QUICKEMAILVERIFICATION_API_KEY" | npx wrangler secret put QUICKEMAILVERIFICATION_API_KEY
+            echo "QuickEmailVerification secondary mailbox verification is configured."
+          else
+            echo "QUICKEMAILVERIFICATION_API_KEY is not configured; email verification will skip safely."
+          fi
+
+      - name: Verify QuickEmailVerification integration in sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${QUICKEMAILVERIFICATION_API_KEY:-}" ]; then
+            echo "QuickEmailVerification sandbox test skipped because no API key is configured."
+            exit 0
+          fi
+
+          curl --fail --silent --show-error --get \
+            "https://api.quickemailverification.com/v1/verify/sandbox" \
+            --data-urlencode "email=safe-to-send@example.com" \
+            --data-urlencode "apikey=$QUICKEMAILVERIFICATION_API_KEY" \
+            | tee /tmp/qev-sandbox.json
+
+          jq -e '(.success == true or .success == "true") and (.safe_to_send == true or .safe_to_send == "true")' /tmp/qev-sandbox.json >/dev/null
+          echo "QuickEmailVerification sandbox verification passed without consuming a production verification."
 
       - name: Confirm Apollo enrichment is disabled and bounded
         shell: bash
@@ -488,6 +518,8 @@ jobs:
               (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='enriched') AS apollo_enriched_candidates,
               (SELECT COUNT(*) FROM contacts WHERE email_source='apollo_verified' AND status='research_only') AS apollo_research_only_contacts,
               (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='apollo_enrichment_spend' AND created_at >= datetime('now','start of day')) AS apollo_enrichment_spend_today,
+              (SELECT COUNT(*) FROM contact_email_verifications WHERE provider='quickemailverification' AND safe_to_send=1 AND verified_at >= datetime('now','-30 day')) AS qev_safe_contacts,
+              (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='qev_verification_request' AND created_at >= datetime('now','start of day')) AS qev_requests_today,
               (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
               (SELECT COUNT(*) FROM contacts WHERE status='active' AND name IS NOT NULL AND length(trim(name))>0) AS named_active_contacts,
               (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='public_scan_v3' AND created_at >= datetime('now','-7 day')) AS contact_scans_last_7d,
