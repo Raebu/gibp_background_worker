@@ -92,6 +92,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         postal_address: Boolean(env.BUSINESS_POSTAL_ADDRESS),
         handoff: Boolean(env.HANDOFF_TO || env.HANDOFF_WEBHOOK_URL),
         apollo_candidate_search: Boolean(env.APOLLO_API_KEY),
+        quickemailverification: Boolean(env.QUICKEMAILVERIFICATION_API_KEY),
       },
     })
   }
@@ -160,6 +161,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "contacts" },
       { kind: "apollo_candidates" },
       { kind: "apollo_enrich" },
+      { kind: "email_verify" },
       { kind: "conversations" },
       { kind: "outreach" },
       { kind: "maintenance" },
