@@ -432,11 +432,22 @@ export async function discoverUkProcurement(env: Env) {
     "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
   )
 
+  const configured: Record<string, unknown> = {}
+  for (const entry of String(env.PROCUREMENT_OCDS_FEEDS || "").split(",").map((x) => x.trim()).filter(Boolean)) {
+    const separator = entry.indexOf("=")
+    if (separator <= 0) continue
+    const name = entry.slice(0, separator).trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60)
+    const url = entry.slice(separator + 1).trim()
+    if (!name || !/^https:\/\//i.test(url)) continue
+    configured[name] = await fetchOcdsFeed(env, name, url)
+  }
+
   const globalSignals = await discoverGlobalProcurementSignals(env)
 
   const result = {
     contracts_finder: contractsFinder,
     find_a_tender: findATender,
+    configured_feeds: configured,
     global_signals: globalSignals,
   }
   await audit(env, "procurement", "uk_batch", "source", "uk_public_procurement", result)
