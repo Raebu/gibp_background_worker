@@ -30,7 +30,12 @@ async function hmac(secret: string, value: string) {
 }
 
 export function isAuthorized(request: Request, env: Env) {
-  const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || ""
+  const bearer = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || ""
+  const cookie = request.headers.get("cookie") || ""
+  const adminCookie =
+    cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("gibp_admin="))
+      ?.slice("gibp_admin=".length) || ""
+  const token = bearer || decodeURIComponent(adminCookie)
   return Boolean(env.ADMIN_TOKEN && token && token === env.ADMIN_TOKEN)
 }
 
