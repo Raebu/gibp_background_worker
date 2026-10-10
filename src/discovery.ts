@@ -58,16 +58,24 @@ async function gleifLookup(name: string) {
   }
 }
 
+const robotsCache = new Map<string, { text: string; expiresAt: number }>()
+
 async function robotsAllows(origin: string, path: string) {
   try {
-    const response = await fetch(new URL("/robots.txt", origin), {
-      headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
-      signal: AbortSignal.timeout(3000),
-    })
-    if (!response.ok) return true
-    const text = await response.text()
+    const key = new URL(origin).origin
+    let cached = robotsCache.get(key)
+    if (!cached || cached.expiresAt <= Date.now()) {
+      const response = await fetch(new URL("/robots.txt", origin), {
+        headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+        signal: AbortSignal.timeout(3000),
+      })
+      const text = response.ok ? await response.text() : ""
+      cached = { text, expiresAt: Date.now() + 10 * 60_000 }
+      robotsCache.set(key, cached)
+    }
+
     let applies = false
-    for (const raw of text.split(/\r?\n/)) {
+    for (const raw of cached.text.split(/\r?\n/)) {
       const line = raw.trim()
       if (/^user-agent:\s*\*/i.test(line)) {
         applies = true
@@ -229,6 +237,26 @@ export function extractNamedPublicContacts(html: string, domainInput: string) {
     output.push({ name, role, email })
   }
 
+  for (const match of html.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) {
+    const email = String(match[0] || "").trim().toLowerCase()
+    if (!emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
+
+    const offset = match.index || 0
+    const context = html.slice(Math.max(0, offset - 900), Math.min(html.length, offset + email.length + 900))
+    const role = extractTargetRole(context)
+    if (!role || roleScore(role) < 60) continue
+
+    const structuredNames = [
+      ...context.matchAll(/<(?:h[1-6]|strong|b)\b[^>]*>([\s\S]*?)<\/(?:h[1-6]|strong|b)>/gi),
+    ]
+      .map((candidate) => cleanPersonName(candidate[1] || ""))
+      .filter((candidate): candidate is string => Boolean(candidate))
+
+    const name = structuredNames.at(-1) || null
+    if (!name) continue
+    output.push({ name, role, email })
+  }
+
   return output.filter((contact) => {
     if (seen.has(contact.email)) return false
     seen.add(contact.email)
@@ -237,48 +265,90 @@ export function extractNamedPublicContacts(html: string, domainInput: string) {
 }
 
 async function contactDiscoveryPages(origin: string) {
-  const fixed = [
+  const targetPattern =
+    /contact|about|who-we-are|people|leadership|executive|management|team|board|partner|alliance|innovation|corporate|business|payment|transaction|treasury|liquidity|procurement|vendor/i
+
+  const discovered: string[] = []
+  const addCandidate = (value: string) => {
+    try {
+      const url = new URL(value, origin)
+      if (normalizeDomain(url.hostname) !== normalizeDomain(new URL(origin).hostname)) return
+      if (!targetPattern.test(`${url.pathname} ${url.search}`)) return
+      discovered.push(url.pathname + url.search)
+    } catch {}
+  }
+
+  const sitemapQueue = [new URL("/sitemap.xml", origin).toString()]
+  const visitedSitemaps = new Set<string>()
+
+  while (sitemapQueue.length && visitedSitemaps.size < 4) {
+    const sitemapUrl = sitemapQueue.shift()!
+    if (visitedSitemaps.has(sitemapUrl)) continue
+    visitedSitemaps.add(sitemapUrl)
+
+    try {
+      const response = await fetch(sitemapUrl, {
+        redirect: "follow",
+        headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+        signal: AbortSignal.timeout(5000),
+      })
+      if (!response.ok) continue
+      const xml = (await response.text()).slice(0, 1_500_000)
+
+      for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+        const location = match[1].trim().replaceAll("&amp;", "&")
+        try {
+          const url = new URL(location, response.url)
+          if (normalizeDomain(url.hostname) !== normalizeDomain(new URL(origin).hostname)) continue
+          if (/\.xml(?:\.gz)?(?:$|\?)/i.test(url.pathname) && visitedSitemaps.size + sitemapQueue.length < 4) {
+            sitemapQueue.push(url.toString())
+          } else {
+            addCandidate(url.toString())
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  try {
+    const response = await fetch(origin, {
+      redirect: "follow",
+      headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (response.ok && (response.headers.get("content-type") || "").includes("text/html")) {
+      const html = (await response.text()).slice(0, 750_000)
+      for (const match of html.matchAll(/<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+        const href = match[1] || ""
+        const label = stripTags(match[2] || "")
+        if (targetPattern.test(`${href} ${label}`)) addCandidate(href)
+      }
+    }
+  } catch {}
+
+  const fallbacks = [
     "/",
     "/contact",
     "/contact-us",
     "/about",
     "/about-us",
+    "/who-we-are",
+    "/our-people",
     "/leadership",
+    "/executive-team",
     "/management",
+    "/management-team",
     "/team",
+    "/board",
     "/partnerships",
     "/partners",
     "/innovation",
-    "/corporate",
-    "/business",
     "/payments",
     "/transaction-banking",
     "/treasury",
   ]
 
-  try {
-    const response = await fetch(new URL("/sitemap.xml", origin), {
-      redirect: "follow",
-      headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
-      signal: AbortSignal.timeout(5000),
-    })
-    if (response.ok) {
-      const xml = (await response.text()).slice(0, 1_000_000)
-      for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
-        try {
-          const url = new URL(match[1].trim())
-          if (
-            normalizeDomain(url.hostname) === normalizeDomain(new URL(origin).hostname) &&
-            /contact|about|leadership|management|team|partner|alliance|innovation|corporate|business|payment|transaction|treasury|liquidity|procurement|vendor/i.test(url.pathname)
-          ) {
-            fixed.push(url.pathname + url.search)
-          }
-        } catch {}
-      }
-    }
-  } catch {}
-
-  return [...new Set(fixed)].slice(0, 6)
+  return [...new Set([...discovered, ...fallbacks])].slice(0, 10)
 }
 
 async function gdeltBackoffActive(env: Env) {
@@ -886,7 +956,7 @@ export async function crawlPublicContacts(
     } catch {}
   }
 
-  await audit(env, "contacts", "public_scan", "account", accountId, {
+  await audit(env, "contacts", "public_scan_v2", "account", accountId, {
     domain: normalizedDomain,
     pages_checked: pagesChecked,
     named_contacts: stored,
