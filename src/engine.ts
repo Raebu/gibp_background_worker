@@ -82,7 +82,7 @@ async function processContactDiscovery(env: Env) {
      ORDER BY CASE a.status WHEN 'qualified' THEN 0 ELSE 1 END,
               a.score DESC,
               a.updated_at ASC
-     LIMIT 3`,
+     LIMIT 2`,
   ).all<Account>()
 
   let scanned = 0
