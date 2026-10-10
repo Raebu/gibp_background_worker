@@ -1,6 +1,7 @@
 PRAGMA foreign_keys = ON;
 
 ALTER TABLE accounts ADD COLUMN priority_adjustment INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE accounts ADD COLUMN partner_track TEXT;
 ALTER TABLE conversations ADD COLUMN qualification_score INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN nurture_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE conversations ADD COLUMN last_signal_at TEXT;
@@ -159,3 +160,33 @@ VALUES
   ('US','FTC CAN-SPAM compliance guide','https://www.ftc.gov/business-guidance/resources/can-spam-act-compliance-guide-business',datetime('now'),datetime('now','+180 day'),'Commercial email policy evidence.'),
   ('CA','CRTC CASL guidance','https://crtc.gc.ca/eng/com500/guide.htm',datetime('now'),datetime('now','+180 day'),'Consent-oriented policy evidence.'),
   ('AU','ACMA spam compliance guidance','https://www.acma.gov.au/spam-compliance',datetime('now'),datetime('now','+180 day'),'Consent-oriented policy evidence.');
+
+
+CREATE TABLE IF NOT EXISTS approved_evidence (
+  id TEXT PRIMARY KEY,
+  evidence_key TEXT NOT NULL UNIQUE,
+  category TEXT NOT NULL,
+  title TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_url TEXT,
+  status TEXT NOT NULL DEFAULT 'approved',
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_approved_evidence_category
+  ON approved_evidence(category,status,updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS search_demand (
+  query TEXT PRIMARY KEY,
+  landing_path TEXT,
+  clicks INTEGER NOT NULL DEFAULT 0,
+  impressions INTEGER NOT NULL DEFAULT 0,
+  average_position REAL,
+  country_code TEXT,
+  source TEXT NOT NULL DEFAULT 'search_console',
+  last_seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_demand_opportunity
+  ON search_demand(clicks DESC,impressions DESC,average_position);
