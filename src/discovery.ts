@@ -143,9 +143,14 @@ function extractTargetRole(value: string) {
     /\bchief technology officer\b|\bCTO\b/i,
     /\bchief information officer\b|\bCIO\b/i,
     /\bchief digital officer\b|\bCDO\b/i,
+    /\bchief operating officer\b|\bCOO\b/i,
+    /\bchief financial officer\b|\bCFO\b/i,
+    /\bchief strategy officer\b/i,
+    /\bpresident\b/i,
+    /\bexecutive vice president\b|\bsenior vice president\b|\bEVP\b|\bSVP\b/i,
     /\bhead of payments?\b|\bpayments? director\b/i,
     /\bhead of transaction banking\b|\btransaction banking director\b/i,
-    /\bhead of treasury(?: technology)?\b|\btreasury director\b/i,
+    /\bhead of treasury(?: technology)?\b|\btreasury director\b|\btreasury management(?: director| head| officer)?\b/i,
     /\bhead of liquidity\b|\bliquidity director\b/i,
     /\bpayments? transformation(?: director| lead| head)?\b/i,
     /\bhead of innovation\b|\binnovation director\b/i,
@@ -164,12 +169,45 @@ function extractTargetRole(value: string) {
 }
 
 function roleScore(role: string) {
-  if (/chief|CEO|CTO|CIO|CDO|managing director/i.test(role)) return 95
+  if (/chief|CEO|CTO|CIO|CDO|COO|CFO|managing director|\bpresident\b/i.test(role)) return 95
   if (/head of payments|payments? director|transaction banking|treasury|liquidity|transformation/i.test(role)) return 90
   if (/head of partnerships|partnerships? director|alliance|business development|innovation/i.test(role)) return 85
   if (/procurement|vendor management/i.test(role)) return 75
-  if (/founder|vice president|\bVP\b/i.test(role)) return 80
+  if (/founder|executive vice president|senior vice president|vice president|\bEVP\b|\bSVP\b|\bVP\b/i.test(role)) return 80
   return 0
+}
+
+function decodeEmailEntities(value: string) {
+  return value
+    .replace(/&#(?:0*64|x0*40);?/gi, "@")
+    .replace(/&commat;/gi, "@")
+    .replace(/&#(?:0*46|x0*2e);?/gi, ".")
+    .replace(/&period;/gi, ".")
+}
+
+function decodeCloudflareEmail(hex: string) {
+  if (!/^[0-9a-f]+$/i.test(hex) || hex.length < 4 || hex.length % 2 !== 0) return null
+  const key = Number.parseInt(hex.slice(0, 2), 16)
+  if (!Number.isFinite(key)) return null
+
+  let output = ""
+  for (let index = 2; index < hex.length; index += 2) {
+    const byte = Number.parseInt(hex.slice(index, index + 2), 16)
+    if (!Number.isFinite(byte)) return null
+    output += String.fromCharCode(byte ^ key)
+  }
+  return output.trim().toLowerCase()
+}
+
+function structuredPersonName(context: string) {
+  const names = [
+    ...context.matchAll(
+      /<(?:h[1-6]|strong|b)\b[^>]*>([\s\S]*?)<\/(?:h[1-6]|strong|b)>/gi,
+    ),
+  ]
+    .map((candidate) => cleanPersonName(candidate[1] || ""))
+    .filter((candidate): candidate is string => Boolean(candidate))
+  return names.at(-1) || null
 }
 
 type NamedPublicContact = {
@@ -210,10 +248,11 @@ function collectJsonLdPeople(value: unknown, output: NamedPublicContact[], domai
 
 export function extractNamedPublicContacts(html: string, domainInput: string) {
   const domain = normalizeDomain(domainInput)
+  const source = decodeEmailEntities(html)
   const output: NamedPublicContact[] = []
   const seen = new Set<string>()
 
-  for (const script of html.matchAll(
+  for (const script of source.matchAll(
     /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
   )) {
     try {
@@ -221,39 +260,69 @@ export function extractNamedPublicContacts(html: string, domainInput: string) {
     } catch {}
   }
 
-  for (const match of html.matchAll(
+  for (const match of source.matchAll(
     /<a\b[^>]*href=["']mailto:([^"'?\s>]+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi,
   )) {
     const email = String(match[1] || "").trim().toLowerCase()
     if (!emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
 
-    const name = cleanPersonName(match[2] || "")
-    if (!name) continue
-
     const offset = match.index || 0
-    const context = html.slice(Math.max(0, offset - 500), Math.min(html.length, offset + match[0].length + 500))
+    const context = source.slice(
+      Math.max(0, offset - 900),
+      Math.min(source.length, offset + match[0].length + 900),
+    )
+    const name =
+      cleanPersonName(match[2] || "") ||
+      structuredPersonName(context)
     const role = extractTargetRole(context)
-    if (!role || roleScore(role) < 60) continue
+    if (!name || !role || roleScore(role) < 60) continue
     output.push({ name, role, email })
   }
 
-  for (const match of html.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) {
+  for (const match of source.matchAll(/data-cfemail=["']([0-9a-f]+)["']/gi)) {
+    const email = decodeCloudflareEmail(match[1] || "")
+    if (!email || !emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
+
+    const offset = match.index || 0
+    const context = source.slice(
+      Math.max(0, offset - 1000),
+      Math.min(source.length, offset + match[0].length + 1000),
+    )
+    const name = structuredPersonName(context)
+    const role = extractTargetRole(context)
+    if (!name || !role || roleScore(role) < 60) continue
+    output.push({ name, role, email })
+  }
+
+  for (const match of source.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)) {
     const email = String(match[0] || "").trim().toLowerCase()
     if (!emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
 
     const offset = match.index || 0
-    const context = html.slice(Math.max(0, offset - 900), Math.min(html.length, offset + email.length + 900))
+    const context = source.slice(
+      Math.max(0, offset - 1000),
+      Math.min(source.length, offset + email.length + 1000),
+    )
     const role = extractTargetRole(context)
-    if (!role || roleScore(role) < 60) continue
+    const name = structuredPersonName(context)
+    if (!name || !role || roleScore(role) < 60) continue
+    output.push({ name, role, email })
+  }
 
-    const structuredNames = [
-      ...context.matchAll(/<(?:h[1-6]|strong|b)\b[^>]*>([\s\S]*?)<\/(?:h[1-6]|strong|b)>/gi),
-    ]
-      .map((candidate) => cleanPersonName(candidate[1] || ""))
-      .filter((candidate): candidate is string => Boolean(candidate))
+  for (const match of source.matchAll(
+    /([A-Z0-9._%+-]+)\s*(?:\[at\]|\(at\))\s*([A-Z0-9.-]+)\s*(?:\[dot\]|\(dot\))\s*([A-Z]{2,})/gi,
+  )) {
+    const email = `${match[1]}@${match[2]}.${match[3]}`.toLowerCase()
+    if (!emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
 
-    const name = structuredNames.at(-1) || null
-    if (!name) continue
+    const offset = match.index || 0
+    const context = source.slice(
+      Math.max(0, offset - 1000),
+      Math.min(source.length, offset + match[0].length + 1000),
+    )
+    const role = extractTargetRole(context)
+    const name = structuredPersonName(context)
+    if (!name || !role || roleScore(role) < 60) continue
     output.push({ name, role, email })
   }
 
