@@ -822,6 +822,9 @@ jobs:
           BEFORE_RESULTS="$(npx wrangler d1 execute GROWTH_DB --remote --json \
             --command "SELECT COUNT(*) AS total FROM contact_email_verifications WHERE provider='quickemailverification';" \
             | jq '[.. | objects | .total? | numbers] | max // 0')"
+          BEFORE_EXCEPTIONS="$(npx wrangler d1 execute GROWTH_DB --remote --json \
+            --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='contacts' AND action='qev_verification_exception';" \
+            | jq '[.. | objects | .total? | numbers] | max // 0')"
 
           curl --fail --silent --show-error \
             -X POST \
@@ -856,15 +859,30 @@ jobs:
                  WHERE category='contacts'
                    AND action='qev_verification_result'
                    AND created_at >= datetime('now','-10 minute')) AS qev_results_recent,
+              $BEFORE_EXCEPTIONS AS qev_exceptions_before,
               (SELECT COUNT(*) FROM audit_events
                  WHERE category='contacts'
-                   AND action='qev_verification_exception'
-                   AND created_at >= datetime('now','-2 minute')) AS qev_exceptions_recent,
+                   AND action='qev_verification_exception') AS qev_exceptions_after,
+              (SELECT COUNT(*) FROM audit_events
+                 WHERE category='contacts'
+                   AND action='qev_verification_exception') - $BEFORE_EXCEPTIONS AS qev_exception_delta,
               (SELECT COUNT(*) FROM messages WHERE direction='outbound') AS real_outbound;
           " | tee /tmp/qev-repair-verification.json
 
-          grep -q '"qev_exceptions_recent": 0' /tmp/qev-repair-verification.json
+          grep -q '"qev_exception_delta": 0' /tmp/qev-repair-verification.json
           grep -q '"real_outbound": 0' /tmp/qev-repair-verification.json
+
+          if ! grep -q '"qev_exception_delta": 0' /tmp/qev-repair-verification.json; then
+            npx wrangler d1 execute GROWTH_DB --remote --json --command "
+              SELECT entity_id,detail_json,created_at
+              FROM audit_events
+              WHERE category='contacts'
+                AND action='qev_verification_exception'
+              ORDER BY created_at DESC
+              LIMIT 20;
+            " | tee /tmp/qev-repair-exceptions.json
+            exit 1
+          fi
 
       - name: Verify website intent ingestion
         shell: bash
