@@ -85,15 +85,205 @@ async function robotsAllows(origin: string, path: string) {
   return true
 }
 
-function roleScore(email: string) {
-  const local = email.split("@")[0].toLowerCase()
-  if (/partner|alliance|businessdevelopment|business\.development/.test(local)) return 85
-  if (/payment|treasury|transaction|innovation|digital/.test(local)) return 78
-  if (/commercial|sales|enterprise|corporate/.test(local)) return 68
-  if (/procurement|supplier|vendor/.test(local)) return 62
-  if (/info|contact|hello|enquir/.test(local)) return 35
-  if (/press|media|privacy|abuse|support/.test(local)) return 5
-  return 28
+const genericMailboxPattern =
+  /^(info|contact|hello|enquiries?|inquiries?|support|sales|commercial|office|admin|marketing|press|media|privacy|security|abuse|help|customerservice|customer\.service|partnerships?|alliances?|procurement|supplier|vendors?)\d*$/i
+
+export function isGenericRoleEmail(email: string) {
+  const local = email.split("@")[0]?.toLowerCase().replace(/[._+-]/g, "") || ""
+  return !local || genericMailboxPattern.test(local)
+}
+
+function stripTags(value: string) {
+  return value
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function cleanPersonName(value: string) {
+  const clean = stripTags(value)
+    .replace(/^(?:email|e-mail|contact|contacting|mailto)\s*[:\-]?\s*/i, "")
+    .trim()
+  if (clean.length < 5 || clean.length > 80) return null
+  const words = clean.split(/\s+/)
+  if (words.length < 2 || words.length > 5) return null
+  if (!words.every((word) => /^[\p{L}][\p{L}'’.-]*$/u.test(word))) return null
+  if (/\b(team|office|support|sales|contact|enquiries|inquiries|department|bank|group|company|limited|ltd|plc)\b/i.test(clean)) {
+    return null
+  }
+  return clean
+}
+
+function extractTargetRole(value: string) {
+  const text = stripTags(value)
+  const patterns = [
+    /\bchief executive officer\b|\bCEO\b/i,
+    /\bmanaging director\b|\bMD\b/i,
+    /\bchief technology officer\b|\bCTO\b/i,
+    /\bchief information officer\b|\bCIO\b/i,
+    /\bchief digital officer\b|\bCDO\b/i,
+    /\bhead of payments?\b|\bpayments? director\b/i,
+    /\bhead of transaction banking\b|\btransaction banking director\b/i,
+    /\bhead of treasury(?: technology)?\b|\btreasury director\b/i,
+    /\bhead of liquidity\b|\bliquidity director\b/i,
+    /\bpayments? transformation(?: director| lead| head)?\b/i,
+    /\bhead of innovation\b|\binnovation director\b/i,
+    /\bhead of partnerships?\b|\bpartnerships? director\b|\balliances? director\b/i,
+    /\bhead of business development\b|\bbusiness development director\b/i,
+    /\bhead of procurement\b|\bprocurement director\b/i,
+    /\bhead of vendor management\b|\bvendor management director\b/i,
+    /\bfounder\b|\bco-founder\b/i,
+    /\bvice president\b|\bVP\b/i,
+  ]
+  for (const pattern of patterns) {
+    const match = text.match(pattern)
+    if (match) return match[0].trim()
+  }
+  return null
+}
+
+function roleScore(role: string) {
+  if (/chief|CEO|CTO|CIO|CDO|managing director/i.test(role)) return 95
+  if (/head of payments|payments? director|transaction banking|treasury|liquidity|transformation/i.test(role)) return 90
+  if (/head of partnerships|partnerships? director|alliance|business development|innovation/i.test(role)) return 85
+  if (/procurement|vendor management/i.test(role)) return 75
+  if (/founder|vice president|\bVP\b/i.test(role)) return 80
+  return 0
+}
+
+type NamedPublicContact = {
+  name: string
+  role: string
+  email: string
+}
+
+function collectJsonLdPeople(value: unknown, output: NamedPublicContact[], domain: string) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonLdPeople(item, output, domain)
+    return
+  }
+  if (!value || typeof value !== "object") return
+
+  const item = value as Record<string, unknown>
+  const type = item["@type"]
+  const types = Array.isArray(type) ? type.map(String) : [String(type || "")]
+  if (types.some((entry) => entry.toLowerCase() === "person")) {
+    const name = cleanPersonName(String(item.name || ""))
+    const role = extractTargetRole(String(item.jobTitle || item.roleName || ""))
+    const rawEmail = String(item.email || "").replace(/^mailto:/i, "").trim().toLowerCase()
+    const emailDomain = rawEmail.split("@")[1] || ""
+    if (
+      name &&
+      role &&
+      rawEmail &&
+      emailDomain.endsWith(domain) &&
+      !isGenericRoleEmail(rawEmail)
+    ) {
+      output.push({ name, role, email: rawEmail })
+    }
+  }
+
+  for (const child of Object.values(item)) {
+    if (child && typeof child === "object") collectJsonLdPeople(child, output, domain)
+  }
+}
+
+export function extractNamedPublicContacts(html: string, domainInput: string) {
+  const domain = normalizeDomain(domainInput)
+  const output: NamedPublicContact[] = []
+  const seen = new Set<string>()
+
+  for (const script of html.matchAll(
+    /<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+  )) {
+    try {
+      collectJsonLdPeople(JSON.parse(script[1]), output, domain)
+    } catch {}
+  }
+
+  for (const match of html.matchAll(
+    /<a\b[^>]*href=["']mailto:([^"'?\s>]+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi,
+  )) {
+    const email = String(match[1] || "").trim().toLowerCase()
+    const emailDomain = email.split("@")[1] || ""
+    if (!emailDomain.endsWith(domain) || isGenericRoleEmail(email)) continue
+
+    const name = cleanPersonName(match[2] || "")
+    if (!name) continue
+
+    const offset = match.index || 0
+    const context = html.slice(Math.max(0, offset - 500), Math.min(html.length, offset + match[0].length + 500))
+    const role = extractTargetRole(context)
+    if (!role || roleScore(role) < 60) continue
+    output.push({ name, role, email })
+  }
+
+  return output.filter((contact) => {
+    if (seen.has(contact.email)) return false
+    seen.add(contact.email)
+    return true
+  })
+}
+
+async function contactDiscoveryPages(origin: string) {
+  const fixed = [
+    "/",
+    "/contact",
+    "/contact-us",
+    "/about",
+    "/about-us",
+    "/leadership",
+    "/management",
+    "/team",
+    "/partnerships",
+    "/partners",
+    "/innovation",
+    "/corporate",
+    "/business",
+    "/payments",
+    "/transaction-banking",
+    "/treasury",
+  ]
+
+  try {
+    const response = await fetch(new URL("/sitemap.xml", origin), {
+      redirect: "follow",
+      headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+    })
+    if (response.ok) {
+      const xml = (await response.text()).slice(0, 1_000_000)
+      for (const match of xml.matchAll(/<loc>([^<]+)<\/loc>/gi)) {
+        try {
+          const url = new URL(match[1].trim())
+          if (
+            normalizeDomain(url.hostname) === normalizeDomain(new URL(origin).hostname) &&
+            /contact|about|leadership|management|team|partner|alliance|innovation|corporate|business|payment|transaction|treasury|liquidity|procurement|vendor/i.test(url.pathname)
+          ) {
+            fixed.push(url.pathname + url.search)
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  return [...new Set(fixed)].slice(0, 10)
+}
+
+async function gdeltBackoffActive(env: Env) {
+  const until = await getSetting(env, "gdelt_backoff_until")
+  return Boolean(until && new Date(until).getTime() > Date.now())
+}
+
+async function activateGdeltBackoff(env: Env, source: string) {
+  const until = new Date(Date.now() + 24 * 3600_000).toISOString()
+  await setSetting(env, "gdelt_backoff_until", until)
+  await audit(env, "discovery", "gdelt_backoff", "source", source, { until })
 }
 
 
@@ -422,6 +612,10 @@ export async function discoverOfficialBankDirectories(env: Env) {
 }
 
 export async function discoverNewsCandidates(env: Env) {
+  if (await gdeltBackoffActive(env)) {
+    return { articles: 0, organisations: 0, skipped: true, reason: "gdelt_backoff" }
+  }
+
   const url = new URL("https://api.gdeltproject.org/api/v2/doc/doc")
   url.searchParams.set("query", env.DISCOVERY_QUERY || defaultQuery)
   url.searchParams.set("mode", "ArtList")
@@ -434,6 +628,7 @@ export async function discoverNewsCandidates(env: Env) {
       status: response.status,
       retry_after: response.headers.get("retry-after"),
     })
+    if (response.status === 429) await activateGdeltBackoff(env, "gdelt")
     return { articles: 0, organisations: 0 }
   }
 
@@ -625,11 +820,14 @@ export async function crawlPublicContacts(
   domain: string,
   countryCode: string | null,
 ) {
-  const origin = `https://${normalizeDomain(domain)}`
-  const pages = ["/", "/contact", "/about", "/partnerships", "/innovation", "/corporate"]
+  const normalizedDomain = normalizeDomain(domain)
+  const origin = `https://${normalizedDomain}`
+  const pages = await contactDiscoveryPages(origin)
   const seen = new Set<string>()
+  let stored = 0
+  let pagesChecked = 0
 
-  for (const path of pages.slice(0, 5)) {
+  for (const path of pages) {
     try {
       if (!(await robotsAllows(origin, path))) continue
       const response = await fetch(new URL(path, origin), {
@@ -637,35 +835,55 @@ export async function crawlPublicContacts(
         headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
       })
       if (!response.ok || !(response.headers.get("content-type") || "").includes("text/html")) continue
-      const html = (await response.text()).slice(0, 500_000)
-      const emails = [
-        ...html.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi),
-        ...html.matchAll(/mailto:([^"'?\s>]+)/gi),
-      ].map((match) => (match[1] || match[0]).replace(/^mailto:/i, "").toLowerCase())
+      pagesChecked += 1
+      const html = (await response.text()).slice(0, 750_000)
 
-      for (const email of emails) {
-        if (seen.has(email)) continue
-        seen.add(email)
-        const emailDomain = email.split("@")[1]
-        if (!emailDomain || !emailDomain.endsWith(normalizeDomain(domain))) continue
-        const score = roleScore(email)
-        if (score < 20) continue
+      for (const contact of extractNamedPublicContacts(html, normalizedDomain)) {
+        if (seen.has(contact.email)) continue
+        seen.add(contact.email)
+
+        const score = roleScore(contact.role)
+        if (score < 60) continue
 
         const now = nowIso()
         await env.GROWTH_DB.prepare(
           `INSERT INTO contacts
-            (id,account_id,email,email_source,source_url,country_code,is_public,verified,seniority_score,status,created_at,updated_at)
-           VALUES (?, ?, ?, 'public_web', ?, ?, 1, 1, ?, 'active', ?, ?)
+            (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
+             seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+           VALUES (?, ?, ?, ?, ?, 'official_named_public', ?, ?, 1, 1, ?, 'unknown',
+             'corporate_b2b_public_professional', 'active', ?, ?)
            ON CONFLICT(email) DO UPDATE SET
+             name=excluded.name,
+             role=excluded.role,
              source_url=excluded.source_url,
              is_public=1,
              verified=1,
              seniority_score=MAX(contacts.seniority_score, excluded.seniority_score),
              updated_at=excluded.updated_at`,
         )
-          .bind(id(), accountId, email, response.url, countryCode, score, now, now)
+          .bind(
+            id(),
+            accountId,
+            contact.name,
+            contact.role,
+            contact.email,
+            response.url,
+            countryCode,
+            score,
+            now,
+            now,
+          )
           .run()
+        stored += 1
       }
     } catch {}
   }
+
+  await audit(env, "contacts", "public_scan", "account", accountId, {
+    domain: normalizedDomain,
+    pages_checked: pagesChecked,
+    named_contacts: stored,
+  })
+  return stored
 }
+
