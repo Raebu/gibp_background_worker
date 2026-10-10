@@ -93,6 +93,12 @@ export function isGenericRoleEmail(email: string) {
   return !local || genericMailboxPattern.test(local)
 }
 
+function emailMatchesDomain(email: string, domain: string) {
+  const emailDomain = email.split("@")[1]?.toLowerCase() || ""
+  const normalized = normalizeDomain(domain)
+  return emailDomain === normalized || emailDomain.endsWith(`.${normalized}`)
+}
+
 function stripTags(value: string) {
   return value
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -177,12 +183,11 @@ function collectJsonLdPeople(value: unknown, output: NamedPublicContact[], domai
     const name = cleanPersonName(String(item.name || ""))
     const role = extractTargetRole(String(item.jobTitle || item.roleName || ""))
     const rawEmail = String(item.email || "").replace(/^mailto:/i, "").trim().toLowerCase()
-    const emailDomain = rawEmail.split("@")[1] || ""
     if (
       name &&
       role &&
       rawEmail &&
-      emailDomain.endsWith(domain) &&
+      emailMatchesDomain(rawEmail, domain) &&
       !isGenericRoleEmail(rawEmail)
     ) {
       output.push({ name, role, email: rawEmail })
@@ -211,8 +216,7 @@ export function extractNamedPublicContacts(html: string, domainInput: string) {
     /<a\b[^>]*href=["']mailto:([^"'?\s>]+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi,
   )) {
     const email = String(match[1] || "").trim().toLowerCase()
-    const emailDomain = email.split("@")[1] || ""
-    if (!emailDomain.endsWith(domain) || isGenericRoleEmail(email)) continue
+    if (!emailMatchesDomain(email, domain) || isGenericRoleEmail(email)) continue
 
     const name = cleanPersonName(match[2] || "")
     if (!name) continue
