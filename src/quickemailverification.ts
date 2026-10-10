@@ -125,7 +125,7 @@ async function storeVerification(
   return { safe, result, definitive_unsafe: definitiveUnsafe }
 }
 
-export async function verifyContactEmails(env: Env) {
+export async function verifyContactEmails(env: Env, maxPerRunOverride?: number) {
   if (!env.QUICKEMAILVERIFICATION_API_KEY) {
     return { requested: 0, verified: 0, safe: 0, blocked: 0, skipped: true, reason: "qev_not_configured" }
   }
@@ -153,7 +153,8 @@ export async function verifyContactEmails(env: Env) {
     }
   }
 
-  const limit = Math.min(qevPerRun(env), dailyCap - requestedToday)
+  const requestedLimit = maxPerRunOverride === undefined ? qevPerRun(env) : Math.max(1, Math.min(1, Number(maxPerRunOverride || 1)))
+  const limit = Math.min(requestedLimit, dailyCap - requestedToday)
   const candidates = await env.GROWTH_DB.prepare(
     `SELECT ct.*, a.score AS account_score, a.status AS account_status
      FROM contacts ct
