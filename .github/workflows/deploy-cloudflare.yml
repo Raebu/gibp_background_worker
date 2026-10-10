@@ -247,8 +247,12 @@ jobs:
           npx wrangler d1 execute GROWTH_DB --remote --json --command "
             SELECT
               (SELECT COUNT(*) FROM accounts) AS accounts,
+              (SELECT COUNT(*) FROM accounts WHERE domain IS NOT NULL AND domain!='') AS accounts_with_domain,
+              (SELECT COUNT(*) FROM accounts WHERE last_researched_at IS NOT NULL) AS researched_accounts,
               (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
               (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
+              (SELECT COUNT(*) FROM contacts WHERE status='active' AND name IS NOT NULL AND length(trim(name))>0) AS named_active_contacts,
+              (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='public_scan' AND created_at >= datetime('now','-7 day')) AS contact_scans_last_7d,
               (SELECT COUNT(*) FROM conversations) AS conversations,
               (SELECT COUNT(*) FROM messages WHERE direction='simulation') AS simulations,
               (SELECT COUNT(*) FROM messages WHERE direction='outbound') AS real_outbound,
