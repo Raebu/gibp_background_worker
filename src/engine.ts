@@ -1085,6 +1085,7 @@ export async function metrics(env: Env) {
       (SELECT COUNT(*) FROM accounts) AS accounts,
       (SELECT COUNT(*) FROM accounts WHERE pipeline='partner') AS partner_accounts,
       (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
+      (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_contact_candidates,
       (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
       (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
       (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
