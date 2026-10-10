@@ -43,6 +43,36 @@ describe("named public contact discovery", () => {
     ])
   })
 
+
+  it("extracts a raw published direct email when nearby official content names the person and role", () => {
+    const html = `
+      <article>
+        <h2>Priya Shah</h2>
+        <p>Head of Transaction Banking</p>
+        <p>For institutional enquiries, reach Priya directly at priya.shah@examplebank.com.</p>
+      </article>
+    `
+
+    expect(extractNamedPublicContacts(html, "examplebank.com")).toEqual([
+      {
+        name: "Priya Shah",
+        role: "Head of Transaction Banking",
+        email: "priya.shah@examplebank.com",
+      },
+    ])
+  })
+
+  it("does not accept a raw published email without a named person in structured nearby content", () => {
+    const html = `
+      <article>
+        <p>Head of Transaction Banking</p>
+        <p>Email payments.team@examplebank.com for enquiries.</p>
+      </article>
+    `
+
+    expect(extractNamedPublicContacts(html, "examplebank.com")).toEqual([])
+  })
+
   it("rejects generic role mailboxes even when displayed publicly", () => {
     const html = `
       <section>

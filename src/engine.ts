@@ -75,7 +75,7 @@ async function processContactDiscovery(env: Env) {
          SELECT 1
          FROM audit_events ae
          WHERE ae.category='contacts'
-           AND ae.action='public_scan'
+           AND ae.action='public_scan_v2'
            AND ae.entity_id=a.id
            AND ae.created_at >= datetime('now','-7 day')
        )
