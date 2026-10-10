@@ -899,20 +899,21 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
 
-  if (kind === "discovery") {
+  if (kind === "directories") {
+    result = { directories: await discoverOfficialBankDirectories(env) }
+  } else if (kind === "discovery") {
     if (!(await shouldRunDiscovery(env))) {
       result = { skipped: true, reason: "not_due" }
     } else {
-      const directories = await discoverOfficialBankDirectories(env)
       const direct = await discoverNewsCandidates(env)
       const partners = await discoverPartnerCandidates(env)
       await setSetting(env, "last_discovery_at", nowIso())
-      result = { directories, direct, partners }
+      result = { direct, partners }
     }
   } else if (kind === "procurement") {
     if (!(await shouldRunProcurement(env))) {
@@ -959,6 +960,7 @@ export async function runTick(env: Env) {
   const started = nowIso()
   const summary: Record<string, unknown> = { started }
 
+  summary.directories = await runQueueJob(env, "directories")
   summary.discovery = await runQueueJob(env, "discovery")
   summary.procurement = await runQueueJob(env, "procurement")
   summary.research = await runQueueJob(env, "research")
