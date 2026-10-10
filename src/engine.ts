@@ -1,5 +1,5 @@
 import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
-import { discoverApolloContactCandidates, enrichTopApolloCandidate, runApolloEnrichmentCommissioningTest } from "./apollo"
+import { discoverApolloContactCandidates, enrichTopApolloCandidate, runApolloEnrichmentCommissioningTest, runApolloEnrichmentCommissioningV2 } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
@@ -1002,7 +1002,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "email_verify" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1041,8 +1041,12 @@ export async function runQueueJob(
     result = await enrichTopApolloCandidate(env)
   } else if (kind === "apollo_enrich_commissioning") {
     result = await runApolloEnrichmentCommissioningTest(env)
+  } else if (kind === "apollo_enrich_commissioning_v2") {
+    result = await runApolloEnrichmentCommissioningV2(env)
   } else if (kind === "email_verify") {
     result = await verifyContactEmails(env)
+  } else if (kind === "email_verify_commissioning_v2") {
+    result = await verifyContactEmails(env, 1)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
