@@ -64,6 +64,7 @@ export interface Account {
   signal_score: number
   engagement_score: number
   risk_score: number
+  priority_adjustment: number
   source: string | null
   source_url: string | null
   research_json: string
