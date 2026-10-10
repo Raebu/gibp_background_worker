@@ -43,6 +43,42 @@ export async function canSendTo(
     return { allowed: false, reason: "not_verified_corporate_email" }
   }
 
+  if ((env.SEND_MODE || "dry_run") === "live" && !env.QUICKEMAILVERIFICATION_API_KEY) {
+    return { allowed: false, reason: "qev_not_configured" }
+  }
+
+  if (env.QUICKEMAILVERIFICATION_API_KEY) {
+    const qev = await env.GROWTH_DB.prepare(
+      `SELECT result,safe_to_send,disposable,accept_all,role,verified_at
+       FROM contact_email_verifications
+       WHERE contact_id=?
+         AND provider='quickemailverification'
+         AND verified_at >= datetime('now','-30 day')
+       ORDER BY verified_at DESC
+       LIMIT 1`,
+    )
+      .bind(contact.id)
+      .first<{
+        result: string
+        safe_to_send: number
+        disposable: number
+        accept_all: number
+        role: number
+        verified_at: string
+      }>()
+
+    if (
+      !qev ||
+      qev.result !== "valid" ||
+      !qev.safe_to_send ||
+      qev.disposable ||
+      qev.accept_all ||
+      qev.role
+    ) {
+      return { allowed: false, reason: "qev_not_safe_to_send" }
+    }
+  }
+
   const suppression = await env.GROWTH_DB.prepare(
     "SELECT email FROM suppressions WHERE lower(email)=lower(?)",
   )
