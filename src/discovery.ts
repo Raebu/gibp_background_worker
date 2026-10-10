@@ -1130,7 +1130,7 @@ export async function crawlPublicContacts(
              seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
            VALUES (?, ?, ?, ?, ?, 'official_named_public', ?, ?, 1, 1, ?, 'unknown',
              'corporate_b2b_public_professional', 'active', ?, ?)
-           ON CONFLICT(email) DO UPDATE SET
+           ON CONFLICT DO UPDATE SET
              name=excluded.name,
              role=excluded.role,
              source_url=excluded.source_url,
