@@ -435,7 +435,7 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
          seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
        VALUES (?,?,?,?,?,'apollo_verified',NULL,?,0,1,?,'unknown',
          'third_party_professional_data_review_required','research_only',?,?)
-       ON CONFLICT(email) DO UPDATE SET
+       ON CONFLICT DO UPDATE SET
          account_id=excluded.account_id,
          name=excluded.name,
          role=excluded.role,
