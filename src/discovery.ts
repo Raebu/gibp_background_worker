@@ -1157,7 +1157,7 @@ export async function crawlPublicContacts(
     } catch {}
   }
 
-  await audit(env, "contacts", "public_scan_v2", "account", accountId, {
+  await audit(env, "contacts", "public_scan_v3", "account", accountId, {
     domain: normalizedDomain,
     pages_checked: pagesChecked,
     named_contacts: stored,
