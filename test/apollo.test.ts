@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { scoreApolloCandidateTitle } from "../src/apollo"
+import { apolloBusinessEmailEligible, scoreApolloCandidateTitle } from "../src/apollo"
 
 describe("Apollo candidate title scoring", () => {
   it("prioritises payments and transaction-banking decision-makers", () => {
@@ -12,6 +12,49 @@ describe("Apollo candidate title scoring", () => {
     expect(scoreApolloCandidateTitle("Chief Technology Officer")).toBeGreaterThanOrEqual(90)
     expect(scoreApolloCandidateTitle("Head of Partnerships")).toBeGreaterThanOrEqual(80)
     expect(scoreApolloCandidateTitle("Chief Operating Officer")).toBeGreaterThanOrEqual(75)
+  })
+
+
+  it("accepts only verified direct corporate email addresses", () => {
+    expect(
+      apolloBusinessEmailEligible(
+        "jane.smith@examplebank.com",
+        "verified",
+        "examplebank.com",
+      ),
+    ).toBe(true)
+
+    expect(
+      apolloBusinessEmailEligible(
+        "contact@examplebank.com",
+        "verified",
+        "examplebank.com",
+      ),
+    ).toBe(false)
+
+    expect(
+      apolloBusinessEmailEligible(
+        "jane.smith@gmail.com",
+        "verified",
+        "examplebank.com",
+      ),
+    ).toBe(false)
+
+    expect(
+      apolloBusinessEmailEligible(
+        "jane.smith@examplebank.com",
+        "unverified",
+        "examplebank.com",
+      ),
+    ).toBe(false)
+
+    expect(
+      apolloBusinessEmailEligible(
+        "email_not_unlocked@examplebank.com",
+        "verified",
+        "examplebank.com",
+      ),
+    ).toBe(false)
   })
 
   it("rejects unrelated senior roles", () => {

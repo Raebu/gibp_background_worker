@@ -70,6 +70,17 @@ GDELT / imports / website intent
            EXECUTIVE HANDOFF
 ```
 
+## Apollo decision-maker enrichment
+
+Apollo is intentionally split into two layers:
+
+- **People Search** is zero-credit and runs automatically to identify likely senior decision-makers at already-qualified, policy-eligible accounts.
+- **Email enrichment** is implemented but disabled by default with `APOLLO_ENRICHMENT_DAILY_CAP=0`.
+
+When enabled, enrichment is hard-capped at a maximum of 3 candidates/day, preserves at least 20 lead credits, requests no phone numbers, no personal emails and no waterfall enrichment, and only promotes a result when Apollo returns a verified direct business email on the account's corporate domain. Generic inboxes remain blocked.
+
+This lets the system stay nearly free while making credit spend an explicit commissioning decision rather than an accidental side effect.
+
 ## Cost design
 
 The architecture is intentionally serverless and scale-to-zero:

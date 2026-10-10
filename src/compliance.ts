@@ -34,8 +34,15 @@ export async function canSendTo(
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
   if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }
   if (isGenericRoleAddress(contact.email)) return { allowed: false, reason: "generic_role_address_blocked" }
-  if (!contact.is_public && !["express", "implied"].includes(contact.consent_status)) {
-    return { allowed: false, reason: "email_not_public_or_consented" }
+  const approvedProfessionalBasis =
+    contact.lawful_basis === "legitimate_interests_corporate_b2b"
+
+  if (
+    !contact.is_public &&
+    !["express", "implied"].includes(contact.consent_status) &&
+    !approvedProfessionalBasis
+  ) {
+    return { allowed: false, reason: "email_not_public_or_approved_professional_source" }
   }
 
   const domain = contact.email.split("@")[1]?.toLowerCase()

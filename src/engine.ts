@@ -1,5 +1,5 @@
 import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
-import { discoverApolloContactCandidates } from "./apollo"
+import { apolloEnrichmentAttemptsToday, discoverApolloContactCandidates, enrichApolloCandidateEmail, type ApolloCandidateRow } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
@@ -210,6 +210,165 @@ async function processApolloCandidateDiscovery(env: Env) {
   }
 
   return { searched, stored, accounts }
+}
+
+async function processApolloEnrichment(env: Env) {
+  const dailyCap = Math.max(
+    0,
+    Math.min(3, Number(env.APOLLO_ENRICHMENT_DAILY_CAP || 0)),
+  )
+  if (dailyCap <= 0) {
+    return { attempted: 0, enriched: 0, skipped: true, reason: "enrichment_disabled" }
+  }
+  if (!env.APOLLO_API_KEY) {
+    return { attempted: 0, enriched: 0, skipped: true, reason: "apollo_not_configured" }
+  }
+
+  const attemptsToday = await apolloEnrichmentAttemptsToday(env)
+  if (attemptsToday >= dailyCap) {
+    return {
+      attempted: 0,
+      enriched: 0,
+      skipped: true,
+      reason: "daily_enrichment_cap",
+      attempts_today: attemptsToday,
+      daily_cap: dailyCap,
+    }
+  }
+
+  const row = await env.GROWTH_DB.prepare(
+    `SELECT
+       cc.id,
+       cc.account_id,
+       cc.provider_person_id,
+       cc.first_name,
+       cc.last_name_display,
+       cc.title,
+       cc.organization_name,
+       cc.score,
+       cc.metadata_json,
+       a.name AS account_name,
+       a.legal_name,
+       a.domain,
+       a.country_code,
+       a.account_type,
+       a.pipeline,
+       a.status,
+       a.score AS account_score,
+       a.fit_score,
+       a.signal_score,
+       a.engagement_score,
+       a.risk_score,
+       a.source,
+       a.source_url,
+       a.research_json,
+       a.last_researched_at,
+       a.next_action_at,
+       a.created_at,
+       a.updated_at
+     FROM contact_candidates cc
+     JOIN accounts a ON a.id=cc.account_id
+     JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
+     WHERE cc.provider='apollo'
+       AND cc.status='candidate'
+       AND cc.score >= 90
+       AND a.status='qualified'
+       AND a.domain IS NOT NULL
+       AND a.domain != ''
+       AND jp.allowed=1
+       AND jp.requires_consent=0
+       AND jp.allow_corporate_b2b=1
+       AND NOT EXISTS (
+         SELECT 1
+         FROM contacts ct
+         WHERE ct.account_id=a.id
+           AND ct.status='active'
+           AND ct.name IS NOT NULL
+           AND length(trim(ct.name)) > 0
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM audit_events ae
+         WHERE ae.category='contacts'
+           AND ae.action='apollo_enrichment_attempt'
+           AND ae.entity_id=a.id
+           AND ae.created_at >= datetime('now','-30 day')
+       )
+     ORDER BY
+       cc.score DESC,
+       a.score DESC,
+       cc.created_at ASC
+     LIMIT 1`,
+  ).first<(ApolloCandidateRow & {
+    account_name: string
+    legal_name: string | null
+    domain: string
+    country_code: string | null
+    account_type: string
+    pipeline: string
+    status: string
+    account_score: number
+    fit_score: number
+    signal_score: number
+    engagement_score: number
+    risk_score: number
+    source: string | null
+    source_url: string | null
+    research_json: string
+    last_researched_at: string | null
+    next_action_at: string | null
+    created_at: string
+    updated_at: string
+  })>()
+
+  if (!row) {
+    return { attempted: 0, enriched: 0, skipped: true, reason: "no_eligible_candidate" }
+  }
+
+  const account: Account = {
+    id: row.account_id,
+    name: row.account_name,
+    legal_name: row.legal_name,
+    domain: row.domain,
+    country_code: row.country_code,
+    account_type: row.account_type,
+    pipeline: row.pipeline,
+    status: row.status,
+    score: row.account_score,
+    fit_score: row.fit_score,
+    signal_score: row.signal_score,
+    engagement_score: row.engagement_score,
+    risk_score: row.risk_score,
+    source: row.source,
+    source_url: row.source_url,
+    research_json: row.research_json,
+    last_researched_at: row.last_researched_at,
+    next_action_at: row.next_action_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  }
+
+  const candidate: ApolloCandidateRow = {
+    id: row.id,
+    account_id: row.account_id,
+    provider_person_id: row.provider_person_id,
+    first_name: row.first_name,
+    last_name_display: row.last_name_display,
+    title: row.title,
+    organization_name: row.organization_name,
+    score: row.score,
+    metadata_json: row.metadata_json,
+  }
+
+  const outcome = await enrichApolloCandidateEmail(env, account, candidate)
+  return {
+    attempted: 1,
+    enriched_contacts: outcome.enriched ? 1 : 0,
+    account_id: account.id,
+    candidate_id: candidate.id,
+    ...outcome,
+  }
 }
 
 async function ensureConversations(env: Env) {
@@ -1001,7 +1160,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1036,6 +1195,8 @@ export async function runQueueJob(
     result = await processContactDiscovery(env)
   } else if (kind === "apollo_candidates") {
     result = await processApolloCandidateDiscovery(env)
+  } else if (kind === "apollo_enrich") {
+    result = await processApolloEnrichment(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
@@ -1070,6 +1231,7 @@ export async function runTick(env: Env) {
   summary.research = await runQueueJob(env, "research")
   summary.contacts = await runQueueJob(env, "contacts")
   summary.apollo_candidates = await runQueueJob(env, "apollo_candidates")
+  summary.apollo_enrich = await runQueueJob(env, "apollo_enrich")
   summary.conversations = await runQueueJob(env, "conversations")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.maintenance = await runQueueJob(env, "maintenance")
@@ -1086,6 +1248,8 @@ export async function metrics(env: Env) {
       (SELECT COUNT(*) FROM accounts WHERE pipeline='partner') AS partner_accounts,
       (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
       (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_contact_candidates,
+      (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='enriched') AS apollo_enriched_candidates,
+      (SELECT COUNT(*) FROM contacts WHERE email_source='apollo_verified_work' AND status='active') AS apollo_enriched_contacts,
       (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
       (SELECT COUNT(*) FROM conversations WHERE state='engaged') AS engaged,
       (SELECT COUNT(*) FROM conversations WHERE state='serious') AS serious,
