@@ -91,6 +91,22 @@ jobs:
           done
           exit 1
 
+      - name: Verify autonomous revenue OS public surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "https://growth.gibp.global/assessment/payment-readiness" | tee /tmp/readiness.html
+          grep -q "Payment Infrastructure Readiness Score" /tmp/readiness.html
+
+          curl --fail --silent --show-error "https://growth.gibp.global/insights" | tee /tmp/insights.html
+          grep -q "GIBP Market Briefings" /tmp/insights.html
+
+          curl --fail --silent --show-error "https://growth.gibp.global/dashboard" | tee /tmp/dashboard.html
+          grep -q "Commercial desk" /tmp/dashboard.html
+
+          curl --fail --silent --show-error "https://growth.gibp.global/briefing?gi=invalid" | tee /tmp/briefing.html
+          grep -q "Briefing unavailable" /tmp/briefing.html
+
       - name: Ensure internal unsubscribe secret exists
         shell: bash
         run: |
@@ -758,6 +774,13 @@ jobs:
               (SELECT COUNT(*) FROM messages WHERE direction='outbound') AS real_outbound,
               (SELECT COUNT(*) FROM opportunities WHERE kind='rfp') AS rfp_opportunities,
               (SELECT COUNT(*) FROM website_intent) AS website_intent_events,
+              (SELECT COUNT(*) FROM account_dossiers) AS account_dossiers,
+              (SELECT COUNT(*) FROM qualification_profiles) AS qualification_profiles,
+              (SELECT COUNT(*) FROM conversion_requests) AS conversion_requests,
+              (SELECT COUNT(*) FROM meeting_requests) AS meeting_requests,
+              (SELECT COUNT(*) FROM authority_briefings WHERE status='published') AS authority_briefings,
+              (SELECT COUNT(*) FROM commercial_outcomes) AS commercial_outcomes,
+              (SELECT COUNT(*) FROM search_demand) AS search_demand_queries,
               (SELECT COUNT(*) FROM handoffs WHERE status='ready') AS ready_sales_handoffs,
               (SELECT COUNT(*) FROM opportunity_handoffs WHERE status='ready') AS ready_procurement_handoffs;
           " | tee /tmp/commissioning-metrics.json

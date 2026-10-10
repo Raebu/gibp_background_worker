@@ -42,6 +42,8 @@
   "vars": {
     "SEND_MODE": "dry_run",
     "FROM_EMAIL": "GIBP Commercial Desk <partnerships@gibp.global>",
+    "OUTBOUND_FROM_EMAIL": "GIBP Commercial Desk <partnerships@gibp.global>",
+    "TRANSACTIONAL_FROM_EMAIL": "GIBP <support@gibp.global>",
     "PUBLIC_BASE_URL": "https://growth.gibp.global",
     "GIBP_SITE_URL": "https://www.gibp.global",
     "AI_MODEL": "@cf/zai-org/glm-4.7-flash",
@@ -54,6 +56,9 @@
     "APOLLO_ENRICHMENT_DAILY_CAP": "0",
     "QEV_DAILY_CAP": "100",
     "QEV_VERIFICATIONS_PER_RUN": "5",
+    "DOSSIERS_PER_RUN": "2",
+    "NURTURE_MIN_DAYS": "45",
+    "AUTHORITY_MIN_SIGNAL_COUNT": "3",
     "RFP_MIN_SCORE": "70",
     "RFP_HANDOFF_SCORE": "82",
     "SERIOUS_THRESHOLD": "85",

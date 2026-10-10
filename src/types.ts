@@ -8,6 +8,8 @@ export interface Env {
   AI?: AiBinding
   SEND_MODE?: string
   FROM_EMAIL?: string
+  OUTBOUND_FROM_EMAIL?: string
+  TRANSACTIONAL_FROM_EMAIL?: string
   PUBLIC_BASE_URL?: string
   GIBP_SITE_URL?: string
   AI_MODEL?: string
@@ -20,6 +22,9 @@ export interface Env {
   APOLLO_ENRICHMENT_DAILY_CAP?: string
   QEV_DAILY_CAP?: string
   QEV_VERIFICATIONS_PER_RUN?: string
+  DOSSIERS_PER_RUN?: string
+  NURTURE_MIN_DAYS?: string
+  AUTHORITY_MIN_SIGNAL_COUNT?: string
   RFP_MIN_SCORE?: string
   RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string
@@ -38,8 +43,12 @@ export interface Env {
   GIBP_APPROVED_FACTS?: string
   DISCOVERY_QUERY?: string
   PARTNER_DISCOVERY_QUERY?: string
+  PROCUREMENT_OCDS_FEEDS?: string
   APOLLO_API_KEY?: string
   QUICKEMAILVERIFICATION_API_KEY?: string
+  MEETING_BOOKING_WEBHOOK_URL?: string
+  MEETING_BOOKING_SECRET?: string
+  BOOKING_URL?: string
 }
 
 export interface Account {
@@ -56,6 +65,8 @@ export interface Account {
   signal_score: number
   engagement_score: number
   risk_score: number
+  priority_adjustment: number
+  partner_track: string | null
   source: string | null
   source_url: string | null
   research_json: string
@@ -66,7 +77,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "learning" | "maintenance"
 }
 
 export interface Contact {
@@ -94,6 +105,8 @@ export interface Conversation {
   id: string
   account_id: string
   contact_id: string
+  pipeline: string
+  opportunity_id: string | null
   state: string
   score: number
   summary: string | null
@@ -102,6 +115,9 @@ export interface Conversation {
   inbound_count: number
   next_action_at: string | null
   human_handoff_at: string | null
+  qualification_score: number
+  nurture_count: number
+  last_signal_at: string | null
   created_at: string
   updated_at: string
 }

@@ -13,6 +13,16 @@ function clampScore(value: unknown) {
   return Math.max(0, Math.min(100, Number(value || 0)))
 }
 
+function partnerTrack(value: unknown, accountType = "") {
+  const requested = String(value || "").toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, "")
+  if (["referral","implementation","technology","strategic_ecosystem"].includes(requested)) return requested
+  const type = accountType.toLowerCase()
+  if (/consult|advis/.test(type)) return "referral"
+  if (/integrat|implement/.test(type)) return "implementation"
+  if (/technology|platform|vendor|infrastructure/.test(type)) return "technology"
+  return "strategic_ecosystem"
+}
+
 async function gdeltBackoffActive(env: Env) {
   const until = await getSetting(env, "gdelt_backoff_until")
   return Boolean(until && new Date(until).getTime() > Date.now())
@@ -31,6 +41,7 @@ async function upsertPartnerAccount(
     account_type?: string
     strength?: number
     article_index: number
+    partner_track?: string
   },
   article: { title: string; url: string; seendate?: string },
 ) {
@@ -45,23 +56,24 @@ async function upsertPartnerAccount(
   if (!existing) {
     await env.GROWTH_DB.prepare(
       `INSERT INTO accounts
-        (id,name,account_type,pipeline,status,source,source_url,created_at,updated_at)
-       VALUES (?,?,?,'partner','candidate','gdelt_partner',?,?,?)`,
+        (id,name,account_type,pipeline,partner_track,status,source,source_url,created_at,updated_at)
+       VALUES (?,?,?,'partner',?,'candidate','gdelt_partner',?,?,?)`,
     )
       .bind(
         accountId,
         candidate.name,
         candidate.account_type || "partner",
+        partnerTrack(candidate.partner_track, candidate.account_type || "partner"),
         article.url,
         now,
         now,
       )
       .run()
-  } else if (existing.pipeline === "direct") {
+  } else {
     await env.GROWTH_DB.prepare(
-      "UPDATE accounts SET pipeline='partner', updated_at=? WHERE id=?",
+      "UPDATE accounts SET pipeline='partner',partner_track=COALESCE(partner_track,?),updated_at=? WHERE id=?",
     )
-      .bind(now, accountId)
+      .bind(partnerTrack(candidate.partner_track, candidate.account_type || "partner"), now, accountId)
       .run()
   }
 
@@ -117,11 +129,13 @@ export async function discoverPartnerCandidates(env: Env) {
         account_type?: string
         article_index: number
         strength: number
+        partner_track?: string
       }>
     >(
       env,
       `Extract organisations that could distribute, implement, integrate or refer GIBP.
-Return a JSON array only with name, account_type, article_index and strength (1-40).
+Return a JSON array only with name, account_type, article_index, strength (1-40) and partner_track.
+partner_track must be referral, implementation, technology or strategic_ecosystem.
 Prioritise payment consultancies, systems integrators, banking technology companies, payment infrastructure vendors, regional fintech distributors and financial-services transformation firms.
 Exclude journalists, individuals and organisations that are clearly only buyers unless they also have a partner/distribution role.`,
       articles.map((article, index) => `${index}: ${article.title}`).join("\n").slice(0, 12000),
@@ -432,11 +446,22 @@ export async function discoverUkProcurement(env: Env) {
     "https://www.find-tender.service.gov.uk/api/1.0/ocdsReleasePackages",
   )
 
+  const configured: Record<string, unknown> = {}
+  for (const entry of String(env.PROCUREMENT_OCDS_FEEDS || "").split(",").map((x) => x.trim()).filter(Boolean)) {
+    const separator = entry.indexOf("=")
+    if (separator <= 0) continue
+    const name = entry.slice(0, separator).trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 60)
+    const url = entry.slice(separator + 1).trim()
+    if (!name || !/^https:\/\//i.test(url)) continue
+    configured[name] = await fetchOcdsFeed(env, name, url)
+  }
+
   const globalSignals = await discoverGlobalProcurementSignals(env)
 
   const result = {
     contracts_finder: contractsFinder,
     find_a_tender: findATender,
+    configured_feeds: configured,
     global_signals: globalSignals,
   }
   await audit(env, "procurement", "uk_batch", "source", "uk_public_procurement", result)
@@ -476,6 +501,51 @@ export async function processProcurementHandoffs(env: Env) {
 
   let created = 0
   for (const opportunity of rows.results || []) {
+    const evidence = await env.GROWTH_DB.prepare(
+      `SELECT evidence_key,category,title,content,source_url
+       FROM approved_evidence
+       WHERE status='approved'
+       ORDER BY updated_at DESC LIMIT 40`,
+    ).all()
+
+    const responsePlan =
+      (await aiJson<{
+        go_no_go?: string
+        mandatory_requirements?: string[]
+        response_sections?: Array<{ section?: string; evidence_keys?: string[]; notes?: string }>
+        evidence_gaps?: string[]
+        questions_for_buyer?: string[]
+        risks?: string[]
+      }>(
+        env,
+        `Prepare a non-binding RFP response plan for GIBP. Return JSON only.
+Use only the opportunity details and approved evidence supplied. Do not claim certifications, customers, permissions, pricing, delivery dates or functionality not present in approved evidence.
+Return go_no_go, mandatory_requirements[], response_sections[], evidence_gaps[], questions_for_buyer[] and risks[].`,
+        JSON.stringify({
+          opportunity: {
+            title: opportunity.title,
+            buyer: opportunity.buyer_name,
+            source: opportunity.source,
+            source_url: opportunity.source_url,
+            country: opportunity.country_code,
+            deadline: opportunity.deadline,
+            estimated_value: opportunity.estimated_value,
+            currency: opportunity.currency,
+            score: opportunity.score,
+            summary: opportunity.summary,
+            metadata: JSON.parse(opportunity.metadata_json || "{}"),
+          },
+          approved_evidence: evidence.results || [],
+        }).slice(0, 18000),
+      )) || {
+        go_no_go: "human_review_required",
+        mandatory_requirements: [],
+        response_sections: [],
+        evidence_gaps: ["No AI response plan was available; review source documents manually."],
+        questions_for_buyer: [],
+        risks: [],
+      }
+
     const briefing = {
       type: "procurement",
       title: opportunity.title,
@@ -489,6 +559,8 @@ export async function processProcurementHandoffs(env: Env) {
       score: opportunity.score,
       summary: opportunity.summary,
       evidence: JSON.parse(opportunity.metadata_json || "{}"),
+      response_plan: responsePlan,
+      approved_evidence_used: evidence.results || [],
       boundary:
         "Autonomous discovery and qualification only. A human must approve any tender response, pricing, legal terms, certifications or binding commitment.",
     }

@@ -34,7 +34,13 @@ export async function canSendTo(
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
   if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }
   if (isGenericRoleAddress(contact.email)) return { allowed: false, reason: "generic_role_address_blocked" }
-  if (!contact.is_public && !["express", "implied"].includes(contact.consent_status)) {
+  const policyBasedCorporateB2b =
+    contact.lawful_basis === "jurisdiction_policy_corporate_b2b"
+  if (
+    !contact.is_public &&
+    !["express", "implied"].includes(contact.consent_status) &&
+    !policyBasedCorporateB2b
+  ) {
     return { allowed: false, reason: "email_not_public_or_consented" }
   }
 
@@ -89,7 +95,10 @@ export async function canSendTo(
   const country = (contact.country_code || account.country_code || "").toUpperCase()
   const policy = country
     ? await env.GROWTH_DB.prepare(
-        "SELECT * FROM jurisdiction_policies WHERE country_code = ?",
+        `SELECT jp.*,pe.review_due_at,pe.source_url
+         FROM jurisdiction_policies jp
+         LEFT JOIN jurisdiction_policy_evidence pe ON pe.country_code=jp.country_code
+         WHERE jp.country_code=?`,
       )
         .bind(country)
         .first<{
@@ -97,6 +106,8 @@ export async function canSendTo(
           requires_consent: number
           allow_corporate_b2b: number
           max_initial_per_day: number
+          review_due_at: string | null
+          source_url: string | null
         }>()
     : null
 
@@ -107,6 +118,12 @@ export async function canSendTo(
     }
   }
   if (!policy.allowed) return { allowed: false, reason: "jurisdiction_blocked" }
+  if (
+    (env.SEND_MODE || "dry_run") === "live" &&
+    (!policy.review_due_at || new Date(policy.review_due_at).getTime() <= Date.now())
+  ) {
+    return { allowed: false, reason: "jurisdiction_policy_review_required" }
+  }
   if (policy.requires_consent && contact.consent_status !== "express" && contact.consent_status !== "implied") {
     return { allowed: false, reason: "consent_required" }
   }

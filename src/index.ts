@@ -2,6 +2,16 @@ import type { Env, GrowthJob } from "./types"
 import { handleResendEvent, importData, metrics, recordWebsiteIntent, runQueueJob, runTick } from "./engine"
 import { isAuthorized, isSiteAuthorized, readUnsubscribeToken, verifyResendWebhook } from "./security"
 import { nowIso } from "./db"
+import {
+  handleConversionRequest,
+  renderAssessment,
+  renderDashboard,
+  renderDashboardLogin,
+  renderInsight,
+  renderInsightsIndex,
+  renderPrivateBriefing,
+} from "./experience"
+import { recordCommercialOutcome } from "./learning"
 
 const WEBSITE_EVENT_WINDOW_MS = 10 * 60 * 1000
 const WEBSITE_EVENT_MAX_REQUESTS = 60
@@ -76,6 +86,108 @@ async function bodyJson(request: Request) {
 
 async function handleAdmin(request: Request, env: Env, path: string) {
   if (!isAuthorized(request, env)) return unauthorized()
+
+  if (path === "/admin/evidence" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM approved_evidence ORDER BY category,evidence_key",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/evidence" && request.method === "POST") {
+    const body = (await bodyJson(request)) as any
+    if (!body?.evidence_key || !body?.category || !body?.title || !body?.content) {
+      return json({ error: "evidence_key_category_title_content_required" }, 400)
+    }
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO approved_evidence
+       (id,evidence_key,category,title,content,source_url,status,updated_at)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON CONFLICT(evidence_key) DO UPDATE SET
+        category=excluded.category,title=excluded.title,content=excluded.content,
+        source_url=excluded.source_url,status=excluded.status,updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),
+      String(body.evidence_key).slice(0,120),
+      String(body.category).slice(0,80),
+      String(body.title).slice(0,300),
+      String(body.content).slice(0,12000),
+      body.source_url ? String(body.source_url).slice(0,1000) : null,
+      body.status === "retired" ? "retired" : "approved",
+      nowIso(),
+    ).run()
+    return json({ ok: true })
+  }
+
+  if (path === "/admin/search-demand" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM search_demand ORDER BY clicks DESC,impressions DESC,average_position ASC LIMIT 250",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/dossiers" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT d.*,a.name AS account_name,a.domain,a.country_code,a.score
+       FROM account_dossiers d JOIN accounts a ON a.id=d.account_id
+       ORDER BY d.confidence DESC,d.updated_at DESC LIMIT 100`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/stakeholders" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT s.*,a.name AS account_name
+       FROM account_stakeholders s JOIN accounts a ON a.id=s.account_id
+       ORDER BY s.influence_score DESC,s.updated_at DESC LIMIT 200`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/conversions" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT cr.*,a.name AS account_name,ct.name AS contact_name,ct.role
+       FROM conversion_requests cr
+       LEFT JOIN accounts a ON a.id=cr.account_id
+       LEFT JOIN contacts ct ON ct.id=cr.contact_id
+       ORDER BY cr.created_at DESC LIMIT 200`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/content" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM authority_briefings ORDER BY updated_at DESC LIMIT 100",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/learnings" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM commercial_learnings ORDER BY ABS(weight) DESC,sample_size DESC LIMIT 200",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/policies" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT jp.*,pe.source_title,pe.source_url,pe.reviewed_at,pe.review_due_at
+       FROM jurisdiction_policies jp
+       LEFT JOIN jurisdiction_policy_evidence pe ON pe.country_code=jp.country_code
+       ORDER BY jp.country_code`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/outcome" && request.method === "POST") {
+    const body = await bodyJson(request)
+    if (!body) return json({ error: "invalid_json" }, 400)
+    try {
+      return json(await recordCommercialOutcome(env, body))
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "invalid_outcome" }, 400)
+    }
+  }
 
   if (path === "/admin/status" && request.method === "GET") {
     return json({
@@ -158,12 +270,16 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
+      { kind: "dossiers" },
       { kind: "contacts" },
       { kind: "apollo_candidates" },
       { kind: "apollo_enrich" },
       { kind: "email_verify" },
       { kind: "conversations" },
+      { kind: "nurture" },
       { kind: "outreach" },
+      { kind: "authority" },
+      { kind: "learning" },
       { kind: "maintenance" },
     ]
     await env.GROWTH_QUEUE.sendBatch(jobs.map((body) => ({ body })))
@@ -203,7 +319,33 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         nowIso(),
       )
       .run()
-    return json({ ok: true })
+
+    const country = String(body.country_code).toUpperCase()
+    if (body.source_url && body.source_title) {
+      const reviewedAt = body.reviewed_at || nowIso()
+      const reviewDueAt =
+        body.review_due_at ||
+        new Date(new Date(reviewedAt).getTime() + 180 * 86400_000).toISOString()
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO jurisdiction_policy_evidence
+          (country_code,source_title,source_url,reviewed_at,review_due_at,notes)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(country_code) DO UPDATE SET
+          source_title=excluded.source_title,source_url=excluded.source_url,
+          reviewed_at=excluded.reviewed_at,review_due_at=excluded.review_due_at,
+          notes=excluded.notes`,
+      )
+        .bind(
+          country,
+          String(body.source_title).slice(0,300),
+          String(body.source_url).slice(0,1000),
+          String(reviewedAt),
+          String(reviewDueAt),
+          body.evidence_notes || null,
+        )
+        .run()
+    }
+    return json({ ok: true, country_code: country })
   }
 
   return json({ error: "not_found" }, 404)
@@ -215,6 +357,61 @@ export default {
 
     if (url.pathname === "/health") {
       return json({ ok: true, service: "gibp-background-worker", mode: env.SEND_MODE || "dry_run" })
+    }
+
+    if (url.pathname === "/dashboard/login" && request.method === "POST") {
+      const form = await request.formData()
+      const token = String(form.get("token") || "")
+      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+        return new Response("Invalid admin token.", { status: 401 })
+      }
+      return new Response(null, {
+        status: 303,
+        headers: {
+          Location: "/dashboard",
+          "Set-Cookie": `gibp_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800`,
+          "Cache-Control": "no-store",
+        },
+      })
+    }
+
+    if (url.pathname === "/dashboard/logout") {
+      return new Response(null, {
+        status: 303,
+        headers: {
+          Location: "/dashboard",
+          "Set-Cookie": "gibp_admin=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
+          "Cache-Control": "no-store",
+        },
+      })
+    }
+
+    if (url.pathname === "/dashboard" && request.method === "GET") {
+      return isAuthorized(request, env) ? renderDashboard(env) : renderDashboardLogin()
+    }
+
+    if (url.pathname === "/briefing" && request.method === "GET") {
+      return renderPrivateBriefing(request, env)
+    }
+
+    if (url.pathname === "/briefing/request" && request.method === "POST") {
+      return handleConversionRequest(request, env)
+    }
+
+    if (url.pathname === "/insights" && request.method === "GET") {
+      return renderInsightsIndex(env)
+    }
+
+    if (url.pathname.startsWith("/insights/") && request.method === "GET") {
+      return renderInsight(env, decodeURIComponent(url.pathname.slice("/insights/".length)))
+    }
+
+    if (url.pathname.startsWith("/assessment/") && ["GET","POST"].includes(request.method)) {
+      return renderAssessment(
+        request,
+        env,
+        decodeURIComponent(url.pathname.slice("/assessment/".length)),
+      )
     }
 
     if (url.pathname.startsWith("/admin/")) {
@@ -233,6 +430,35 @@ export default {
         return json({ error: "invalid_json" }, 400)
       }
       return json(await handleResendEvent(env, event))
+    }
+
+    if (url.pathname === "/events/search" && request.method === "POST") {
+      if (!isSiteAuthorized(request, env)) return unauthorized()
+      const body = (await bodyJson(request)) as any
+      const query = String(body?.query || "").trim().slice(0,500)
+      if (!query) return json({ error: "query_required" }, 400)
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO search_demand
+         (query,landing_path,clicks,impressions,average_position,country_code,source,last_seen_at,updated_at)
+         VALUES (?,?,?,?,?,?,?, ?,?)
+         ON CONFLICT(query) DO UPDATE SET
+          landing_path=COALESCE(excluded.landing_path,search_demand.landing_path),
+          clicks=excluded.clicks,impressions=excluded.impressions,
+          average_position=excluded.average_position,
+          country_code=COALESCE(excluded.country_code,search_demand.country_code),
+          source=excluded.source,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`,
+      ).bind(
+        query,
+        body.landing_path ? String(body.landing_path).slice(0,500) : null,
+        Math.max(0,Number(body.clicks || 0)),
+        Math.max(0,Number(body.impressions || 0)),
+        body.average_position == null ? null : Number(body.average_position),
+        body.country_code ? String(body.country_code).toUpperCase().slice(0,2) : null,
+        body.source ? String(body.source).slice(0,80) : "search_console",
+        body.last_seen_at ? String(body.last_seen_at).slice(0,100) : nowIso(),
+        nowIso(),
+      ).run()
+      return json({ recorded: true, query })
     }
 
     if (url.pathname === "/events/website") {
@@ -299,10 +525,15 @@ export default {
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
+      { kind: "dossiers" },
       ...Array.from({ length: contactScans }, () => ({ kind: "contacts" as const })),
       { kind: "apollo_candidates" },
+      { kind: "email_verify" },
       { kind: "conversations" },
+      { kind: "nurture" },
       { kind: "outreach" },
+      { kind: "authority" },
+      { kind: "learning" },
       { kind: "maintenance" },
     ]
 

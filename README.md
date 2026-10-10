@@ -28,6 +28,15 @@ The first production-oriented build contains:
 - **Automatic safe replies** for routine enquiries using only approved GIBP facts.
 - **Automatic referral capture** when a recipient introduces another contact.
 - **Website-intent ingestion** so GIBP web activity can increase account/conversation scores.
+- **Persistent AI account dossiers** with evidence, current initiatives, use-case hypotheses, stakeholder maps, recommended offer and next-best action.
+- **Conversation qualification profiles** covering problem, architecture, objective, geography, scale, budget context, timeline, decision process, influence and missing information.
+- **Recipient-local working-hour scheduling** plus signal-aware long-cycle nurture.
+- **Dynamic private account briefings** served from the Worker with non-indexed account research, public evidence and institutional conversion actions.
+- **Institutional lead magnets** for payment readiness, cross-border friction, rail selection and liquidity efficiency.
+- **Meeting-booking adapter** with a safe booking-link fallback and serious-opportunity escalation.
+- **Authority engine** that turns clusters of public market signals into sourced GIBP market briefings.
+- **Closed-loop commercial learning** from replies, serious handoffs and recorded commercial outcomes.
+- **Authenticated Autonomous Market Development Desk** at `/dashboard`.
 - **Global suppression list and one-click unsubscribe endpoint**.
 - **Serious-opportunity handoff** with a complete briefing/transcript only when the opportunity crosses the threshold or asks for a meeting/binding commercial/legal/security discussion.
 - **Dry-run by default**. The repository cannot send live outreach until explicitly configured.
@@ -82,7 +91,7 @@ The architecture is intentionally serverless and scale-to-zero:
 - Apollo is optional. People Search is used as the zero-credit candidate layer; standard person matching is capped independently and never reveals phone/personal email.
 - QuickEmailVerification is an optional second mailbox-quality gate. It verifies up to 100 contacts/day on the configured free-tier cap and blocks role, catch-all, disposable or otherwise unsafe addresses from outreach.
 - GDELT, Wikidata and GLEIF for free public discovery/enrichment.
-- Optional Apollo People Search for zero-credit candidate discovery. Paid people enrichment is deliberately not implemented in the autonomous Worker.
+- Optional Apollo People Search for zero-credit candidate discovery. Paid person matching exists behind an independently capped, policy-gated layer; the persistent production cap remains zero unless explicitly changed.
 - No paid CRM, vector database, queue cluster or always-on VM is required.
 
 Paid data providers can later be added behind adapters without changing the state machine.
@@ -309,11 +318,11 @@ The architecture is intentionally ready for:
 - formal partner-program directory discovery;
 - event/conference intelligence;
 - explicitly approved Apollo people enrichment from the persisted candidate queue;
-- meeting-calendar booking after qualification;
-- private per-account briefing pages;
-- GIBP website campaign tokens;
+- direct calendar-provider credentials for fully automatic slot selection/booking via the meeting adapter;
+- additional reviewed country policies beyond the currently evidenced set;
+- more first-party and official global procurement/directory feeds;
 - CRM export/sync;
-- a lightweight internal serious-opportunity dashboard.
+- deeper annual-report, earnings-call and technology-estate research sources.
 
 The core rule remains: **the machine handles the pipeline; a human appears only when a serious conversation or binding decision begins.**
 
@@ -361,3 +370,68 @@ Operational rules:
 - live sending is blocked entirely if QuickEmailVerification is intended but its key is absent.
 
 The API key is stored only as a Cloudflare Worker secret and is never exposed to the browser.
+
+
+## Autonomous Revenue OS v2
+
+The Worker now runs the following additional background phases:
+
+```text
+research
+  -> dossier
+  -> contact discovery / Apollo candidates
+  -> QEV mailbox verification
+  -> reviewed jurisdiction-policy activation
+  -> conversation creation
+  -> local-working-time outreach
+  -> reply qualification
+  -> stakeholder expansion
+  -> signal-aware nurture
+  -> serious handoff / meeting adapter
+
+market signals
+  -> authority briefing
+  -> public insight / assessment
+  -> conversion request
+  -> account/conversation score
+
+commercial outcomes
+  -> country/pipeline/role learnings
+  -> account priority adjustment
+```
+
+### New public surfaces
+
+- `GET /briefing?gi=<signed-intent-token>` — non-indexed private account briefing.
+- `POST /briefing/request` — architecture, technical, security, due-diligence, executive or meeting request.
+- `GET|POST /assessment/payment-readiness`
+- `GET|POST /assessment/cross-border-friction`
+- `GET|POST /assessment/rail-selection`
+- `GET|POST /assessment/liquidity-efficiency`
+- `GET /insights` and `GET /insights/:slug` — sourced public market briefings.
+- `GET /dashboard` — authenticated Autonomous Market Development Desk.
+- `POST /events/search` — signed ingestion for Search Console/search-demand signals so non-email acquisition feeds the same commercial brain.
+
+### New administrative data
+
+- `GET /admin/dossiers`
+- `GET /admin/stakeholders`
+- `GET /admin/conversions`
+- `GET /admin/content`
+- `GET /admin/learnings`
+- `GET /admin/policies`
+- `GET|POST /admin/evidence` — manage the approved fact/evidence library used by the SDR and RFP planner.
+- `GET /admin/search-demand`
+- `POST /admin/outcome` — record meeting/opportunity/proposal/win/loss/deferred/partner/RFP outcomes for closed-loop learning.
+
+### Sender separation
+
+Set `OUTBOUND_FROM_EMAIL` for acquisition mail and `TRANSACTIONAL_FROM_EMAIL` for internal/transactional mail. `FROM_EMAIL` remains a compatibility fallback. The checked-in defaults keep commercial outbound on `partnerships@gibp.global` and internal handoffs on `support@gibp.global`.
+
+### Calendar integration
+
+The meeting layer is fully coded but provider-neutral. Set `MEETING_BOOKING_WEBHOOK_URL` (and optionally `MEETING_BOOKING_SECRET`) to a calendar/booking adapter that returns `status`, `scheduled_at` and/or `booking_url`. `BOOKING_URL` can be used as a no-provider fallback. Meeting requests remain serious handoffs; the AI never makes contractual or commercial commitments.
+
+### Jurisdiction policy evidence
+
+Live sending now requires the relevant country policy to have a non-expired evidence review. GB, US, CA and AU source records are seeded in migration 0008. Unknown or stale jurisdictions remain blocked/monitor-only until reviewed rather than being guessed.
