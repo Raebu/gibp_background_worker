@@ -16,6 +16,7 @@ export interface Env {
   DAILY_NEW_OUTREACH_CAP?: string
   RAMP_START_CAP?: string
   CONTACT_SCANS_PER_HOUR?: string
+  APOLLO_CANDIDATE_SEARCHES_PER_HOUR?: string
   RFP_MIN_SCORE?: string
   RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string
@@ -34,6 +35,7 @@ export interface Env {
   GIBP_APPROVED_FACTS?: string
   DISCOVERY_QUERY?: string
   PARTNER_DISCOVERY_QUERY?: string
+  APOLLO_API_KEY?: string
 }
 
 export interface Account {
@@ -60,7 +62,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
