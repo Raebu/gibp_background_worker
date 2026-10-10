@@ -18,6 +18,8 @@ export interface Env {
   CONTACT_SCANS_PER_HOUR?: string
   APOLLO_CANDIDATE_SEARCHES_PER_HOUR?: string
   APOLLO_ENRICHMENT_DAILY_CAP?: string
+  QEV_DAILY_CAP?: string
+  QEV_VERIFICATIONS_PER_RUN?: string
   RFP_MIN_SCORE?: string
   RFP_HANDOFF_SCORE?: string
   SERIOUS_THRESHOLD?: string
@@ -37,6 +39,7 @@ export interface Env {
   DISCOVERY_QUERY?: string
   PARTNER_DISCOVERY_QUERY?: string
   APOLLO_API_KEY?: string
+  QUICKEMAILVERIFICATION_API_KEY?: string
 }
 
 export interface Account {
@@ -63,7 +66,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "email_verify" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
