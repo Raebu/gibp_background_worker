@@ -390,7 +390,8 @@ export async function renderDashboard(env: Env) {
      (SELECT COUNT(*) FROM conversion_requests WHERE created_at>=datetime('now','-1 day')) conversions_24h,
      (SELECT COUNT(*) FROM meeting_requests WHERE status='scheduled') meetings,
      (SELECT COUNT(*) FROM opportunities WHERE kind='rfp' AND status IN ('qualified','handoff')) rfps,
-     (SELECT COUNT(*) FROM authority_briefings WHERE status='published') briefings`,
+     (SELECT COUNT(*) FROM authority_briefings WHERE status='published') briefings,
+     (SELECT COUNT(*) FROM search_demand) search_queries`,
   ).first<any>()
   const handoffs = await env.GROWTH_DB.prepare(
     `SELECT h.created_at,a.name account_name,ct.name contact_name,ct.role,h.priority,h.reason
@@ -404,6 +405,9 @@ export async function renderDashboard(env: Env) {
   ).all<any>()
   const learnings = await env.GROWTH_DB.prepare(
     "SELECT * FROM commercial_learnings WHERE sample_size>=5 ORDER BY weight DESC,sample_size DESC LIMIT 10",
+  ).all<any>()
+  const searchDemand = await env.GROWTH_DB.prepare(
+    "SELECT query,landing_path,clicks,impressions,average_position FROM search_demand ORDER BY clicks DESC,impressions DESC LIMIT 10",
   ).all<any>()
 
   const cards = Object.entries(metrics || {}).map(([k,v]) =>
@@ -419,7 +423,8 @@ export async function renderDashboard(env: Env) {
      ${(handoffs.results||[]).map((x:any)=>`<tr><td>${esc(x.account_name)}</td><td>${esc(x.contact_name)}<br><span class="muted">${esc(x.role)}</span></td><td>${esc(x.priority)}</td><td>${esc(x.reason)}</td></tr>`).join("") || '<tr><td colspan="4">No serious handoffs yet.</td></tr>'}
      </tbody></table></section>
      <div class="grid"><section class="card"><h2>Latest conversion signals</h2>${(conversions.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.account_name || "Unattributed visitor")}</strong><div>${esc(x.kind)} · score ${esc(x.score)}</div><div class="muted">${esc(x.created_at)}</div></div>`).join("") || "<p>No conversion requests yet.</p>"}</section>
-     <section class="card"><h2>What the system is learning</h2>${(learnings.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.dimension)}: ${esc(x.dimension_value)}</strong><div>weight ${esc(x.weight)} · sample ${esc(x.sample_size)} · serious ${esc(x.serious_count)} · won ${esc(x.won_count)}</div></div>`).join("") || "<p>Learning activates after enough real commercial outcomes exist.</p>"}</section></div>`,
+     <section class="card"><h2>What the system is learning</h2>${(learnings.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.dimension)}: ${esc(x.dimension_value)}</strong><div>weight ${esc(x.weight)} · sample ${esc(x.sample_size)} · serious ${esc(x.serious_count)} · won ${esc(x.won_count)}</div></div>`).join("") || "<p>Learning activates after enough real commercial outcomes exist.</p>"}</section></div>
+     <section class="card"><h2>Non-email demand</h2>${(searchDemand.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.query)}</strong><div>${esc(x.clicks)} clicks · ${esc(x.impressions)} impressions · avg position ${esc(x.average_position ?? "—")}</div><div class="muted">${esc(x.landing_path || "")}</div></div>`).join("") || "<p>No search-demand data has been ingested yet.</p>"}</section>`,
     { noindex:true },
   )
 }
