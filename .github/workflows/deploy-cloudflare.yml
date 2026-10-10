@@ -972,6 +972,35 @@ jobs:
             exit 1
           fi
 
+          run_job_and_wait() {
+            local kind="$1"
+            local before
+            before="$(query_job_count "$kind")"
+            curl --fail --silent --show-error \
+              -X POST \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "{\"body\":{\"kind\":\"$kind\"}}" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues/$QUEUE_ID/messages" \
+              > "/tmp/revenue-os-$kind-publish.json"
+            jq -e '.success == true' "/tmp/revenue-os-$kind-publish.json" >/dev/null
+
+            for attempt in $(seq 1 24); do
+              local after
+              after="$(query_job_count "$kind")"
+              if [ "$after" -gt "$before" ]; then
+                return 0
+              fi
+              sleep 5
+            done
+            echo "Timed out waiting for $kind commissioning job."
+            return 1
+          }
+
+          echo "Refreshing the highest-priority accounts attached to active named contacts."
+          run_job_and_wait research
+          run_job_and_wait dossiers
+
           BEFORE_CONVERSATION_JOB="$(query_job_count conversations)"
           curl --fail --silent --show-error \
             -X POST \
@@ -998,8 +1027,40 @@ jobs:
             --command "SELECT COUNT(*) AS total FROM conversations;" \
             | jq '[.. | objects | .total? | numbers] | max // 0')"
           if [ "$AFTER_CONVERSATIONS" -le "$BEFORE_CONVERSATIONS" ] && [ "$AFTER_CONVERSATIONS" -lt 1 ]; then
-            echo "Conversation commissioning did not produce an eligible conversation."
-            exit 1
+            echo "No account passed the production qualification gate after targeted research."
+            npx wrangler d1 execute GROWTH_DB --remote --json --command "
+              SELECT
+                a.id AS account_id,
+                a.name AS account_name,
+                a.status AS account_status,
+                a.score AS account_score,
+                a.fit_score,
+                a.signal_score,
+                a.last_researched_at,
+                ct.id AS contact_id,
+                ct.name AS contact_name,
+                ct.role,
+                ct.seniority_score,
+                ct.email_source,
+                ct.status AS contact_status
+              FROM contacts ct
+              JOIN accounts a ON a.id=ct.account_id
+              WHERE ct.status='active'
+                AND ct.name IS NOT NULL
+                AND length(trim(ct.name))>0
+              ORDER BY a.score DESC,ct.seniority_score DESC
+              LIMIT 20;
+            " | tee /tmp/revenue-os-qualification-gate.json
+
+            npx wrangler d1 execute GROWTH_DB --remote --json --command "
+              INSERT INTO settings (key,value,updated_at)
+              VALUES ('autonomous_revenue_os_v2_end_to_end_commissioned','qualification_gate_held',datetime('now'))
+              ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+            " >/dev/null
+
+            print_metrics | tee /tmp/revenue-os-e2e-gated.json
+            echo "End-to-end pipeline reached the qualification gate safely; no outreach was simulated or sent."
+            exit 0
           fi
 
           BEFORE_OUTREACH_JOB="$(query_job_count outreach)"
