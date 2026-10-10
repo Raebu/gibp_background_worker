@@ -63,7 +63,7 @@ async function storeVerification(
     `INSERT INTO contact_email_verifications
       (id,contact_id,provider,result,reason,safe_to_send,disposable,accept_all,role,free,
        did_you_mean,mx_domain,success,attempt_count,verified_at,raw_json)
-     VALUES (?,?, 'quickemailverification', ?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+     VALUES (?, ?, 'quickemailverification', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
      ON CONFLICT(contact_id,provider) DO UPDATE SET
        result=excluded.result,
        reason=excluded.reason,

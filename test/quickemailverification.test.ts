@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest"
+declare const require: (name: string) => { readFileSync(path: string, encoding: string): string }
+const fs = require("fs")
 import { qevDailyCap, qevPerRun, qevSafeToSend } from "../src/quickemailverification"
 
 describe("QuickEmailVerification safety gate", () => {
@@ -27,6 +29,16 @@ describe("QuickEmailVerification safety gate", () => {
       safe_to_send: false,
       accept_all: true,
     })).toBe(false)
+  })
+
+  it("keeps the persistence insert aligned to the 16-column table", () => {
+    const source = fs.readFileSync("src/quickemailverification.ts", "utf8")
+    expect(source).toContain(
+      "VALUES (?, ?, 'quickemailverification', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+    )
+    expect(source).not.toContain(
+      "VALUES (?,?, 'quickemailverification', ?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
+    )
   })
 
   it("caps the free-tier budget at 100 requests per day", () => {
