@@ -1,5 +1,5 @@
 import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
-import { discoverApolloContactCandidates } from "./apollo"
+import { discoverApolloContactCandidates, enrichTopApolloCandidate } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
@@ -1001,7 +1001,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1036,6 +1036,8 @@ export async function runQueueJob(
     result = await processContactDiscovery(env)
   } else if (kind === "apollo_candidates") {
     result = await processApolloCandidateDiscovery(env)
+  } else if (kind === "apollo_enrich") {
+    result = await enrichTopApolloCandidate(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
@@ -1070,6 +1072,7 @@ export async function runTick(env: Env) {
   summary.research = await runQueueJob(env, "research")
   summary.contacts = await runQueueJob(env, "contacts")
   summary.apollo_candidates = await runQueueJob(env, "apollo_candidates")
+  summary.apollo_enrich = await runQueueJob(env, "apollo_enrich")
   summary.conversations = await runQueueJob(env, "conversations")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.maintenance = await runQueueJob(env, "maintenance")

@@ -130,12 +130,21 @@ jobs:
             echo "APOLLO_API_KEY is not configured; candidate discovery will skip safely."
           fi
 
-      - name: Confirm Apollo integration is search-only
+      - name: Confirm Apollo enrichment is disabled and bounded
         shell: bash
         run: |
           set -euo pipefail
+          node - <<'NODE'
+          const fs = require("fs")
+          const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
+          if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") {
+            throw new Error("APOLLO_ENRICHMENT_DAILY_CAP must remain 0 during commissioning")
+          }
+          NODE
+          ! grep -R "reveal_phone_number: true" src
+          ! grep -R "run_waterfall_email: true" src
+          ! grep -R "run_waterfall_phone: true" src
           ! grep -R "/people/bulk_match" src
-          ! grep -R "/people/match" src
 
       - name: Re-verify health after secret bootstrap
         shell: bash
@@ -415,6 +424,9 @@ jobs:
               (SELECT COUNT(*) FROM accounts WHERE source='fdic_bankfind') AS fdic_accounts,
               (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_contact_candidates,
               (SELECT COUNT(DISTINCT account_id) FROM contact_candidates WHERE provider='apollo' AND status='candidate') AS apollo_candidate_accounts,
+              (SELECT COUNT(*) FROM contact_candidates WHERE provider='apollo' AND status='enriched') AS apollo_enriched_candidates,
+              (SELECT COUNT(*) FROM contacts WHERE email_source='apollo_verified' AND status='research_only') AS apollo_research_only_contacts,
+              (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='apollo_enrichment_spend' AND created_at >= datetime('now','start of day')) AS apollo_enrichment_spend_today,
               (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
               (SELECT COUNT(*) FROM contacts WHERE status='active' AND name IS NOT NULL AND length(trim(name))>0) AS named_active_contacts,
               (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='public_scan_v3' AND created_at >= datetime('now','-7 day')) AS contact_scans_last_7d,
