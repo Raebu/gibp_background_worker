@@ -137,6 +137,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
 
   if (path === "/admin/enqueue" && request.method === "POST") {
     const jobs: GrowthJob[] = [
+      { kind: "directories" },
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
@@ -270,6 +271,7 @@ export default {
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     const jobs: GrowthJob[] = [
+      { kind: "directories" },
       { kind: "discovery" },
       { kind: "procurement" },
       { kind: "research" },
