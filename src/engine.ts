@@ -1081,7 +1081,7 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
       (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
        consent_status,lawful_basis,status,created_at,updated_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)
-     ON CONFLICT(email) DO UPDATE SET
+     ON CONFLICT DO UPDATE SET
        account_id=excluded.account_id, name=COALESCE(excluded.name,contacts.name),
        role=COALESCE(excluded.role,contacts.role), source_url=COALESCE(excluded.source_url,contacts.source_url),
        country_code=COALESCE(excluded.country_code,contacts.country_code),
