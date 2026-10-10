@@ -64,9 +64,33 @@ async function processResearch(env: Env) {
      FROM accounts a
      LEFT JOIN jurisdiction_policies jp
        ON jp.country_code=upper(COALESCE(a.country_code,''))
-     WHERE a.status IN ('candidate','research')
+     WHERE (
+         a.status IN ('candidate','research')
+         OR (
+           a.status='monitor'
+           AND EXISTS (
+             SELECT 1 FROM contacts ct
+             WHERE ct.account_id=a.id
+               AND ct.status='active'
+               AND ct.verified=1
+               AND ct.name IS NOT NULL
+               AND length(trim(ct.name))>0
+           )
+         )
+       )
        AND (a.last_researched_at IS NULL OR a.last_researched_at < datetime('now','-3 day'))
      ORDER BY
+       CASE
+         WHEN EXISTS (
+           SELECT 1 FROM contacts ct
+           WHERE ct.account_id=a.id
+             AND ct.status='active'
+             AND ct.verified=1
+             AND ct.name IS NOT NULL
+             AND length(trim(ct.name))>0
+         ) THEN 0
+         ELSE 1
+       END,
        CASE
          WHEN jp.allowed=1 AND jp.requires_consent=0 AND jp.allow_corporate_b2b=1 THEN 0
          ELSE 1
