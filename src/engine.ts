@@ -43,10 +43,20 @@ async function shouldRunProcurement(env: Env) {
 
 async function processResearch(env: Env) {
   const result = await env.GROWTH_DB.prepare(
-    `SELECT * FROM accounts
-     WHERE status IN ('candidate','research')
-     AND (last_researched_at IS NULL OR last_researched_at < datetime('now','-3 day'))
-     ORDER BY score DESC, created_at ASC
+    `SELECT a.*
+     FROM accounts a
+     LEFT JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
+     WHERE a.status IN ('candidate','research')
+       AND (a.last_researched_at IS NULL OR a.last_researched_at < datetime('now','-3 day'))
+     ORDER BY
+       CASE
+         WHEN jp.allowed=1 AND jp.requires_consent=0 AND jp.allow_corporate_b2b=1 THEN 0
+         ELSE 1
+       END,
+       CASE WHEN a.domain IS NOT NULL AND a.domain!='' THEN 0 ELSE 1 END,
+       a.score DESC,
+       a.created_at ASC
      LIMIT 2`,
   ).all<Account>()
 
@@ -60,9 +70,14 @@ async function processContactDiscovery(env: Env) {
   const result = await env.GROWTH_DB.prepare(
     `SELECT a.*
      FROM accounts a
+     JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
      WHERE a.domain IS NOT NULL
        AND a.domain != ''
        AND a.status IN ('qualified','candidate','monitor','research')
+       AND jp.allowed=1
+       AND jp.requires_consent=0
+       AND jp.allow_corporate_b2b=1
        AND NOT EXISTS (
          SELECT 1
          FROM contacts ct
