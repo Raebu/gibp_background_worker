@@ -289,6 +289,7 @@ Do not claim an existing relationship, customer, regulatory permission, guarante
 Avoid hype. Use one evidence-based reason for reaching out. Maximum 140 words. End with a low-friction question.
 Commercial objective: ${objective}
 Pipeline: ${pipeline}
+Partner track: ${account.partner_track || "not applicable"}
 This is sequence step ${step} of maximum 3.
 
 Approved GIBP facts:
@@ -637,14 +638,27 @@ async function autoReply(
 ) {
   const facts = approvedFacts(env)
   const qualification = await getQualificationProfile(env, conversation.id)
+  const structuredEvidence = await env.GROWTH_DB.prepare(
+    `SELECT evidence_key,category,title,content,source_url
+     FROM approved_evidence WHERE status='approved'
+     ORDER BY updated_at DESC LIMIT 25`,
+  ).all()
+  const account = await accountFor(env, conversation.account_id)
+  const briefingToken = account
+    ? await makeIntentToken(conversation.id, account.id, env)
+    : null
+  const privateBriefingUrl = briefingToken
+    ? `${env.PUBLIC_BASE_URL || "https://growth.gibp.global"}/briefing?gi=${encodeURIComponent(briefingToken)}`
+    : null
   const generated =
     (await aiJson<{ subject: string; text: string }>(
       env,
       `Write a safe B2B reply for GIBP. Return JSON only with subject and text.
-Use ONLY approved facts. Never invent customers, pricing, contracts, security guarantees, regulatory status, integrations, SLAs, exclusivity or implementation dates.
-If the question cannot be answered from approved facts, say the team can cover it in a discussion.
+Use ONLY approved facts and structured approved evidence. Never invent customers, pricing, contracts, security guarantees, regulatory status, integrations, SLAs, exclusivity or implementation dates.
+If the question cannot be answered from approved material, say the team can cover it in a discussion.
+For positive or information-request replies, if qualification is incomplete, ask at most one natural follow-up question from the missing fields. Do not turn the reply into a questionnaire.
 Maximum 170 words.`,
-      `Approved facts:\n${facts}\n\nQualification so far:\n${JSON.stringify(qualification || {})}\n\nClassification:\n${JSON.stringify(classification)}\n\nInbound subject: ${inboundSubject}\nInbound:\n${inboundText.slice(0, 7000)}`,
+      `Approved facts:\n${facts}\n\nStructured approved evidence:\n${JSON.stringify(structuredEvidence.results || [])}\n\nPrivate briefing URL:\n${privateBriefingUrl || "unavailable"}\n\nQualification so far:\n${JSON.stringify(qualification || {})}\n\nClassification:\n${JSON.stringify(classification)}\n\nInbound subject: ${inboundSubject}\nInbound:\n${inboundText.slice(0, 7000)}`,
     )) || {
       subject: inboundSubject.toLowerCase().startsWith("re:") ? inboundSubject : `Re: ${inboundSubject}`,
       text:
@@ -653,10 +667,18 @@ Maximum 170 words.`,
           : "Thank you for coming back to me. I can provide the relevant GIBP material and keep the discussion focused on your institutional requirements. If a question needs a commercial, legal or technical commitment, I’ll bring the appropriate person into the conversation.\n\nRegards,\nGIBP Commercial Desk",
     }
 
+  const shouldIncludeBriefing =
+    Boolean(privateBriefingUrl) &&
+    ["positive","information_request","referral"].includes(classification.intent)
+  const replyText =
+    shouldIncludeBriefing && !generated.text.includes(String(privateBriefingUrl))
+      ? `${generated.text.trim()}\n\nPrivate briefing: ${privateBriefingUrl}`
+      : generated.text
+
   const result = await sendResend(env, {
     to: contact.email,
     subject: generated.subject,
-    text: generated.text,
+    text: replyText,
     conversationId: conversation.id,
     classification: "auto_reply",
     headers: inboundMessageId
