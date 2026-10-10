@@ -87,6 +87,45 @@ async function bodyJson(request: Request) {
 async function handleAdmin(request: Request, env: Env, path: string) {
   if (!isAuthorized(request, env)) return unauthorized()
 
+  if (path === "/admin/evidence" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM approved_evidence ORDER BY category,evidence_key",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/evidence" && request.method === "POST") {
+    const body = (await bodyJson(request)) as any
+    if (!body?.evidence_key || !body?.category || !body?.title || !body?.content) {
+      return json({ error: "evidence_key_category_title_content_required" }, 400)
+    }
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO approved_evidence
+       (id,evidence_key,category,title,content,source_url,status,updated_at)
+       VALUES (?,?,?,?,?,?,?,?)
+       ON CONFLICT(evidence_key) DO UPDATE SET
+        category=excluded.category,title=excluded.title,content=excluded.content,
+        source_url=excluded.source_url,status=excluded.status,updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),
+      String(body.evidence_key).slice(0,120),
+      String(body.category).slice(0,80),
+      String(body.title).slice(0,300),
+      String(body.content).slice(0,12000),
+      body.source_url ? String(body.source_url).slice(0,1000) : null,
+      body.status === "retired" ? "retired" : "approved",
+      nowIso(),
+    ).run()
+    return json({ ok: true })
+  }
+
+  if (path === "/admin/search-demand" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM search_demand ORDER BY clicks DESC,impressions DESC,average_position ASC LIMIT 250",
+    ).all()
+    return json(rows.results || [])
+  }
+
   if (path === "/admin/dossiers" && request.method === "GET") {
     const rows = await env.GROWTH_DB.prepare(
       `SELECT d.*,a.name AS account_name,a.domain,a.country_code,a.score
@@ -391,6 +430,35 @@ export default {
         return json({ error: "invalid_json" }, 400)
       }
       return json(await handleResendEvent(env, event))
+    }
+
+    if (url.pathname === "/events/search" && request.method === "POST") {
+      if (!isSiteAuthorized(request, env)) return unauthorized()
+      const body = (await bodyJson(request)) as any
+      const query = String(body?.query || "").trim().slice(0,500)
+      if (!query) return json({ error: "query_required" }, 400)
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO search_demand
+         (query,landing_path,clicks,impressions,average_position,country_code,source,last_seen_at,updated_at)
+         VALUES (?,?,?,?,?,?,?, ?,?)
+         ON CONFLICT(query) DO UPDATE SET
+          landing_path=COALESCE(excluded.landing_path,search_demand.landing_path),
+          clicks=excluded.clicks,impressions=excluded.impressions,
+          average_position=excluded.average_position,
+          country_code=COALESCE(excluded.country_code,search_demand.country_code),
+          source=excluded.source,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`,
+      ).bind(
+        query,
+        body.landing_path ? String(body.landing_path).slice(0,500) : null,
+        Math.max(0,Number(body.clicks || 0)),
+        Math.max(0,Number(body.impressions || 0)),
+        body.average_position == null ? null : Number(body.average_position),
+        body.country_code ? String(body.country_code).toUpperCase().slice(0,2) : null,
+        body.source ? String(body.source).slice(0,80) : "search_console",
+        body.last_seen_at ? String(body.last_seen_at).slice(0,100) : nowIso(),
+        nowIso(),
+      ).run()
+      return json({ recorded: true, query })
     }
 
     if (url.pathname === "/events/website") {
