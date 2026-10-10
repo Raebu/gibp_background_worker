@@ -66,6 +66,7 @@ export interface Account {
   engagement_score: number
   risk_score: number
   priority_adjustment: number
+  partner_track: string | null
   source: string | null
   source_url: string | null
   research_json: string
