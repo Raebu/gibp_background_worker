@@ -91,6 +91,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         unsubscribe: Boolean(env.UNSUBSCRIBE_SECRET),
         postal_address: Boolean(env.BUSINESS_POSTAL_ADDRESS),
         handoff: Boolean(env.HANDOFF_TO || env.HANDOFF_WEBHOOK_URL),
+        apollo_candidate_search: Boolean(env.APOLLO_API_KEY),
       },
     })
   }
@@ -142,6 +143,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "procurement" },
       { kind: "research" },
       { kind: "contacts" },
+      { kind: "apollo_candidates" },
       { kind: "conversations" },
       { kind: "outreach" },
       { kind: "maintenance" },
@@ -280,6 +282,7 @@ export default {
       { kind: "procurement" },
       { kind: "research" },
       ...Array.from({ length: contactScans }, () => ({ kind: "contacts" as const })),
+      { kind: "apollo_candidates" },
       { kind: "conversations" },
       { kind: "outreach" },
       { kind: "maintenance" },
