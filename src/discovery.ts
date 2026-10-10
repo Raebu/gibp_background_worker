@@ -62,6 +62,7 @@ async function robotsAllows(origin: string, path: string) {
   try {
     const response = await fetch(new URL("/robots.txt", origin), {
       headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+      signal: AbortSignal.timeout(3000),
     })
     if (!response.ok) return true
     const text = await response.text()
@@ -259,6 +260,7 @@ async function contactDiscoveryPages(origin: string) {
     const response = await fetch(new URL("/sitemap.xml", origin), {
       redirect: "follow",
       headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+      signal: AbortSignal.timeout(5000),
     })
     if (response.ok) {
       const xml = (await response.text()).slice(0, 1_000_000)
@@ -276,7 +278,7 @@ async function contactDiscoveryPages(origin: string) {
     }
   } catch {}
 
-  return [...new Set(fixed)].slice(0, 10)
+  return [...new Set(fixed)].slice(0, 6)
 }
 
 async function gdeltBackoffActive(env: Env) {
@@ -837,6 +839,7 @@ export async function crawlPublicContacts(
       const response = await fetch(new URL(path, origin), {
         redirect: "follow",
         headers: { "User-Agent": "GIBPResearchBot/1.0 (+https://www.gibp.global)" },
+        signal: AbortSignal.timeout(5000),
       })
       if (!response.ok || !(response.headers.get("content-type") || "").includes("text/html")) continue
       pagesChecked += 1
