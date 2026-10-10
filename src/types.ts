@@ -63,7 +63,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "conversations" | "outreach" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "conversations" | "outreach" | "maintenance"
 }
 
 export interface Contact {
