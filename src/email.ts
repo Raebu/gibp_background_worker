@@ -53,7 +53,8 @@ export async function sendResend(
   }
 
   if (!env.RESEND_API_KEY) throw new Error("RESEND_API_KEY is required for live sending")
-  if (!env.FROM_EMAIL) throw new Error("FROM_EMAIL is required for live sending")
+  const outboundFrom = env.OUTBOUND_FROM_EMAIL || env.FROM_EMAIL
+  if (!outboundFrom) throw new Error("OUTBOUND_FROM_EMAIL or FROM_EMAIL is required for live sending")
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -62,7 +63,7 @@ export async function sendResend(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: env.FROM_EMAIL,
+      from: outboundFrom,
       to: [input.to],
       subject: input.subject,
       text,
@@ -145,7 +146,8 @@ export async function sendInternalResend(
     throw new Error("Internal email recipient must match HANDOFF_TO")
   }
   if (!env.RESEND_API_KEY) throw new Error("RESEND_API_KEY is required for internal mail")
-  if (!env.FROM_EMAIL) throw new Error("FROM_EMAIL is required for internal mail")
+  const transactionalFrom = env.TRANSACTIONAL_FROM_EMAIL || env.FROM_EMAIL
+  if (!transactionalFrom) throw new Error("TRANSACTIONAL_FROM_EMAIL or FROM_EMAIL is required for internal mail")
 
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -154,7 +156,7 @@ export async function sendInternalResend(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      from: env.FROM_EMAIL,
+      from: transactionalFrom,
       to: [input.to],
       subject: input.subject,
       text: input.text,
