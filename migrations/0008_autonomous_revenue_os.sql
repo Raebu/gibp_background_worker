@@ -190,3 +190,14 @@ CREATE TABLE IF NOT EXISTS search_demand (
 
 CREATE INDEX IF NOT EXISTS idx_search_demand_opportunity
   ON search_demand(clicks DESC,impressions DESC,average_position);
+
+
+INSERT OR IGNORE INTO approved_evidence
+  (id,evidence_key,category,title,content,source_url,status,updated_at)
+VALUES
+  ('evidence-core-positioning','gibp_core_positioning','corporate','GIBP core positioning',
+   'GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money.',
+   'https://www.gibp.global','approved',datetime('now')),
+  ('evidence-commercial-boundary','gibp_commercial_boundary','governance','Autonomous commercial boundary',
+   'The autonomous commercial agent must not make binding commitments on pricing, contracts, regulatory status, security guarantees, exclusivity, SLAs, liability, implementation dates or bespoke functionality.',
+   'https://www.gibp.global','approved',datetime('now'));
