@@ -80,6 +80,7 @@ The architecture is intentionally serverless and scale-to-zero:
 - Cloudflare Workers AI for limited research/copy/classification. The engine enforces an independent daily AI-call cap.
 - Resend for sending and receiving.
 - Apollo is optional. People Search is used as the zero-credit candidate layer; standard person matching is capped independently and never reveals phone/personal email.
+- QuickEmailVerification is an optional second mailbox-quality gate. It verifies up to 100 contacts/day on the configured free-tier cap and blocks role, catch-all, disposable or otherwise unsafe addresses from outreach.
 - GDELT, Wikidata and GLEIF for free public discovery/enrichment.
 - Optional Apollo People Search for zero-credit candidate discovery. Paid people enrichment is deliberately not implemented in the autonomous Worker.
 - No paid CRM, vector database, queue cluster or always-on VM is required.
@@ -116,6 +117,7 @@ This is intentional. Global discovery can be automatic while email policy remain
 
 - `SEND_MODE=dry_run`
 - `APOLLO_ENRICHMENT_DAILY_CAP=0` until explicitly commissioned
+- `QEV_DAILY_CAP=100` and `QEV_VERIFICATIONS_PER_RUN=5` when QuickEmailVerification is configured
 - 50 total outbound messages/day
 - 5 new first-contact messages/day initially
 - automatic reputation ramp up to a configured ceiling of 20 new first contacts/day
@@ -336,3 +338,26 @@ When enabled later:
 - matched records are stored as `research_only`, not `active`, so enrichment alone cannot trigger outreach.
 
 This gives a second commissioning gate between paying for contact data and authorising that data for outreach.
+
+
+## QuickEmailVerification mailbox gate
+
+QuickEmailVerification can be configured as a second-stage mailbox verification layer after a contact has been discovered.
+
+The worker uses the single-address verification API and stores the provider result separately from source/contact provenance. It never treats mailbox verification as evidence of consent or lawful basis.
+
+Operational rules:
+
+- maximum 100 verification requests/day in code;
+- five candidates per hourly run by default, with the daily cap enforcing the free-tier ceiling;
+- only named, already-source-verified contacts in approved corporate-B2B jurisdictions are selected;
+- Apollo-derived research-only contacts are prioritised;
+- `safe_to_send=true` plus a valid result is required;
+- role, disposable and accept-all addresses are not outreach-eligible;
+- unknown results remain blocked and may be retried once after 24 hours;
+- results older than 30 days are eligible for re-verification;
+- a definitive unsafe result moves an active contact to `verification_blocked`;
+- when the QEV key is configured, outreach requires a fresh safe QEV result;
+- live sending is blocked entirely if QuickEmailVerification is intended but its key is absent.
+
+The API key is stored only as a Cloudflare Worker secret and is never exposed to the browser.
