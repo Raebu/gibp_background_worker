@@ -587,6 +587,124 @@ async function discoverPraBanks(env: Env) {
   }
 }
 
+async function discoverFdicBanks(env: Env) {
+  const previousOffset = Number((await getSetting(env, "fdic_bank_offset")) || 0)
+  const offset = Number.isFinite(previousOffset) ? Math.max(0, previousOffset) : 0
+  const url = new URL("https://api.fdic.gov/banks/institutions")
+  url.searchParams.set("filters", "ACTIVE:1")
+  url.searchParams.set(
+    "fields",
+    "NAME,CERT,CITY,STALP,STNAME,ACTIVE,ASSET,DEP,OFFICES,WEBADDR",
+  )
+  url.searchParams.set("sort_by", "ASSET")
+  url.searchParams.set("sort_order", "DESC")
+  url.searchParams.set("limit", "100")
+  url.searchParams.set("offset", String(offset))
+  url.searchParams.set("format", "json")
+
+  try {
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "GIBPGrowth/1.0 (+https://www.gibp.global)",
+      },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) {
+      await audit(env, "discovery", "fdic_directory_failed", "source", "fdic", {
+        status: response.status,
+        offset,
+      })
+      return { found: 0, created: 0, offset }
+    }
+
+    const payload = (await response.json()) as {
+      data?: Array<{ data?: Record<string, unknown> }>
+      meta?: { total?: number }
+    }
+    const institutions = payload.data || []
+    let created = 0
+    let usableWebsites = 0
+
+    for (const wrapper of institutions) {
+      const item = wrapper.data || {}
+      const name = String(item.NAME || "").trim()
+      const rawWebsite = String(item.WEBADDR || "").trim()
+      const cert = String(item.CERT || "").trim()
+      if (!name) continue
+
+      const hasWebsite =
+        rawWebsite &&
+        !/not available|none|n\/a|unknown/i.test(rawWebsite) &&
+        /[a-z0-9]\.[a-z]{2,}/i.test(rawWebsite)
+      if (hasWebsite) usableWebsites += 1
+
+      const asset = Number(item.ASSET || 0)
+      const fitScore =
+        asset >= 100_000_000
+          ? 92
+          : asset >= 10_000_000
+            ? 88
+            : asset >= 1_000_000
+              ? 82
+              : 76
+
+      if (
+        await upsertDirectoryBank(env, {
+          name,
+          domain: hasWebsite ? rawWebsite : null,
+          countryCode: "US",
+          source: "fdic_bankfind",
+          sourceUrl: "https://banks.data.fdic.gov/bankfind-suite/bankfind",
+          sourceId: cert || name,
+          metadata: {
+            cert: cert || null,
+            city: item.CITY || null,
+            state: item.STALP || item.STNAME || null,
+            assets_thousands_usd: Number.isFinite(asset) ? asset : null,
+            deposits_thousands_usd: Number(item.DEP || 0) || null,
+            offices: Number(item.OFFICES || 0) || null,
+            reported_website: hasWebsite ? rawWebsite : null,
+          },
+          fitScore,
+          signalStrength: 12,
+        })
+      ) {
+        created += 1
+      }
+    }
+
+    const total = Number(payload.meta?.total || 0)
+    const nextOffset =
+      institutions.length < 100 || (total > 0 && offset + institutions.length >= total)
+        ? 0
+        : offset + institutions.length
+
+    await setSetting(env, "fdic_bank_offset", String(nextOffset))
+    await audit(env, "discovery", "fdic_directory", "source", "fdic", {
+      found: institutions.length,
+      created,
+      usable_websites: usableWebsites,
+      offset,
+      next_offset: nextOffset,
+      total: total || null,
+    })
+    return {
+      found: institutions.length,
+      created,
+      usable_websites: usableWebsites,
+      offset,
+    }
+  } catch (error) {
+    await audit(env, "discovery", "fdic_directory_exception", "source", "fdic", {
+      error: error instanceof Error ? error.message : "unknown",
+      offset,
+    })
+    return { found: 0, created: 0, offset }
+  }
+}
+
 async function discoverWikidataBanks(env: Env) {
   const previousOffset = Number((await getSetting(env, "wikidata_bank_offset")) || 0)
   const offset = Number.isFinite(previousOffset) ? Math.max(0, previousOffset) : 0
@@ -682,9 +800,10 @@ export async function discoverOfficialBankDirectories(env: Env) {
   }
 
   const pra = await discoverPraBanks(env)
+  const fdic = await discoverFdicBanks(env)
   const wikidata = await discoverWikidataBanks(env)
   await setSetting(env, "last_bank_directory_discovery_at", nowIso())
-  return { pra, wikidata }
+  return { pra, fdic, wikidata }
 }
 
 export async function discoverNewsCandidates(env: Env) {
