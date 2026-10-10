@@ -794,15 +794,28 @@ OFFSET ${offset}
 }
 
 export async function discoverOfficialBankDirectories(env: Env) {
-  const last = await getSetting(env, "last_bank_directory_discovery_at")
-  if (last && Date.now() - new Date(last).getTime() < 24 * 3600_000) {
-    return { skipped: true, reason: "not_due" }
-  }
+  const now = Date.now()
+  const lastLegacy = await getSetting(env, "last_bank_directory_discovery_at")
+  const lastFdic = await getSetting(env, "last_fdic_directory_discovery_at")
 
-  const pra = await discoverPraBanks(env)
-  const fdic = await discoverFdicBanks(env)
-  const wikidata = await discoverWikidataBanks(env)
-  await setSetting(env, "last_bank_directory_discovery_at", nowIso())
+  const legacyDue =
+    !lastLegacy || now - new Date(lastLegacy).getTime() >= 24 * 3600_000
+  const fdicDue =
+    !lastFdic || now - new Date(lastFdic).getTime() >= 24 * 3600_000
+
+  const pra = legacyDue
+    ? await discoverPraBanks(env)
+    : { skipped: true, reason: "not_due" }
+  const wikidata = legacyDue
+    ? await discoverWikidataBanks(env)
+    : { skipped: true, reason: "not_due" }
+  const fdic = fdicDue
+    ? await discoverFdicBanks(env)
+    : { skipped: true, reason: "not_due" }
+
+  if (legacyDue) await setSetting(env, "last_bank_directory_discovery_at", nowIso())
+  if (fdicDue) await setSetting(env, "last_fdic_directory_discovery_at", nowIso())
+
   return { pra, fdic, wikidata }
 }
 
