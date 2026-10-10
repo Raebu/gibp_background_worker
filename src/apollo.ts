@@ -173,7 +173,7 @@ export async function discoverApolloContactCandidates(env: Env, account: Account
 }
 
 
-type ApolloCandidateRow = {
+export type ApolloCandidateRow = {
   id: string
   account_id: string
   provider_person_id: string
