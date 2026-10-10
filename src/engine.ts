@@ -2,7 +2,7 @@ import type { Account, Contact, Conversation, Env, ReplyClassification } from ".
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
-import { discoverNewsCandidates, discoverOfficialBankDirectories, enrichAccount } from "./discovery"
+import { crawlPublicContacts, discoverNewsCandidates, discoverOfficialBankDirectories, enrichAccount } from "./discovery"
 import { fetchReceivedEmail, recordOutbound, recordSimulation, sendInternalResend, sendResend } from "./email"
 import { makeIntentToken, readIntentToken } from "./security"
 import { discoverPartnerCandidates, discoverUkProcurement, processProcurementHandoffs } from "./opportunities"
@@ -56,6 +56,45 @@ async function processResearch(env: Env) {
   return result.results?.length || 0
 }
 
+async function processContactDiscovery(env: Env) {
+  const result = await env.GROWTH_DB.prepare(
+    `SELECT a.*
+     FROM accounts a
+     WHERE a.domain IS NOT NULL
+       AND a.domain != ''
+       AND a.status IN ('qualified','candidate','monitor','research')
+       AND NOT EXISTS (
+         SELECT 1
+         FROM contacts ct
+         WHERE ct.account_id=a.id
+           AND ct.status='active'
+           AND ct.name IS NOT NULL
+           AND length(trim(ct.name)) > 0
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM audit_events ae
+         WHERE ae.category='contacts'
+           AND ae.action='public_scan'
+           AND ae.entity_id=a.id
+           AND ae.created_at >= datetime('now','-7 day')
+       )
+     ORDER BY CASE a.status WHEN 'qualified' THEN 0 ELSE 1 END,
+              a.score DESC,
+              a.updated_at ASC
+     LIMIT 3`,
+  ).all<Account>()
+
+  let scanned = 0
+  let contacts = 0
+  for (const account of result.results || []) {
+    if (!account.domain) continue
+    contacts += await crawlPublicContacts(env, account.id, account.domain, account.country_code)
+    scanned += 1
+  }
+  return { scanned, contacts }
+}
+
 async function ensureConversations(env: Env) {
   const result = await env.GROWTH_DB.prepare(
     `SELECT ct.id AS contact_id, a.id AS account_id, a.pipeline AS pipeline
@@ -64,7 +103,10 @@ async function ensureConversations(env: Env) {
      LEFT JOIN conversations c ON c.contact_id=ct.id AND c.state NOT IN ('closed','lost')
      WHERE c.id IS NULL
        AND ct.status='active'
-       AND ct.seniority_score >= 35
+       AND ct.name IS NOT NULL
+       AND length(trim(ct.name)) > 0
+       AND ct.verified=1
+       AND ct.seniority_score >= 60
        AND a.status='qualified'
        AND a.score >= 55
      ORDER BY a.score DESC, ct.seniority_score DESC
@@ -842,7 +884,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "discovery" | "procurement" | "research" | "conversations" | "outreach" | "maintenance",
+  kind: "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -872,6 +914,8 @@ export async function runQueueJob(
     }
   } else if (kind === "research") {
     result = { researched: await processResearch(env) }
+  } else if (kind === "contacts") {
+    result = await processContactDiscovery(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
@@ -903,6 +947,7 @@ export async function runTick(env: Env) {
   summary.discovery = await runQueueJob(env, "discovery")
   summary.procurement = await runQueueJob(env, "procurement")
   summary.research = await runQueueJob(env, "research")
+  summary.contacts = await runQueueJob(env, "contacts")
   summary.conversations = await runQueueJob(env, "conversations")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.maintenance = await runQueueJob(env, "maintenance")
