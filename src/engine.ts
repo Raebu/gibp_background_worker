@@ -43,10 +43,20 @@ async function shouldRunProcurement(env: Env) {
 
 async function processResearch(env: Env) {
   const result = await env.GROWTH_DB.prepare(
-    `SELECT * FROM accounts
-     WHERE status IN ('candidate','research')
-     AND (last_researched_at IS NULL OR last_researched_at < datetime('now','-3 day'))
-     ORDER BY score DESC, created_at ASC
+    `SELECT a.*
+     FROM accounts a
+     LEFT JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
+     WHERE a.status IN ('candidate','research')
+       AND (a.last_researched_at IS NULL OR a.last_researched_at < datetime('now','-3 day'))
+     ORDER BY
+       CASE
+         WHEN jp.allowed=1 AND jp.requires_consent=0 AND jp.allow_corporate_b2b=1 THEN 0
+         ELSE 1
+       END,
+       CASE WHEN a.domain IS NOT NULL AND a.domain!='' THEN 0 ELSE 1 END,
+       a.score DESC,
+       a.created_at ASC
      LIMIT 2`,
   ).all<Account>()
 
@@ -60,9 +70,14 @@ async function processContactDiscovery(env: Env) {
   const result = await env.GROWTH_DB.prepare(
     `SELECT a.*
      FROM accounts a
+     JOIN jurisdiction_policies jp
+       ON jp.country_code=upper(COALESCE(a.country_code,''))
      WHERE a.domain IS NOT NULL
        AND a.domain != ''
        AND a.status IN ('qualified','candidate','monitor','research')
+       AND jp.allowed=1
+       AND jp.requires_consent=0
+       AND jp.allow_corporate_b2b=1
        AND NOT EXISTS (
          SELECT 1
          FROM contacts ct
@@ -884,20 +899,21 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
 
-  if (kind === "discovery") {
+  if (kind === "directories") {
+    result = { directories: await discoverOfficialBankDirectories(env) }
+  } else if (kind === "discovery") {
     if (!(await shouldRunDiscovery(env))) {
       result = { skipped: true, reason: "not_due" }
     } else {
-      const directories = await discoverOfficialBankDirectories(env)
       const direct = await discoverNewsCandidates(env)
       const partners = await discoverPartnerCandidates(env)
       await setSetting(env, "last_discovery_at", nowIso())
-      result = { directories, direct, partners }
+      result = { direct, partners }
     }
   } else if (kind === "procurement") {
     if (!(await shouldRunProcurement(env))) {
@@ -944,6 +960,7 @@ export async function runTick(env: Env) {
   const started = nowIso()
   const summary: Record<string, unknown> = { started }
 
+  summary.directories = await runQueueJob(env, "directories")
   summary.discovery = await runQueueJob(env, "discovery")
   summary.procurement = await runQueueJob(env, "procurement")
   summary.research = await runQueueJob(env, "research")
