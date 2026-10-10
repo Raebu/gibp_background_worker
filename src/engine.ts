@@ -1,5 +1,5 @@
 import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
-import { discoverApolloContactCandidates, enrichTopApolloCandidate } from "./apollo"
+import { discoverApolloContactCandidates, enrichTopApolloCandidate, runApolloEnrichmentCommissioningTest } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
 import { audit, daysFromNow, getSetting, id, nowIso, setSetting } from "./db"
@@ -1001,7 +1001,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "conversations" | "outreach" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "conversations" | "outreach" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1038,6 +1038,8 @@ export async function runQueueJob(
     result = await processApolloCandidateDiscovery(env)
   } else if (kind === "apollo_enrich") {
     result = await enrichTopApolloCandidate(env)
+  } else if (kind === "apollo_enrich_commissioning") {
+    result = await runApolloEnrichmentCommissioningTest(env)
   } else if (kind === "conversations") {
     result = { conversations_created: await ensureConversations(env) }
   } else if (kind === "outreach") {
