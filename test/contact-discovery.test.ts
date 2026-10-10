@@ -73,6 +73,45 @@ describe("named public contact discovery", () => {
     expect(extractNamedPublicContacts(html, "examplebank.com")).toEqual([])
   })
 
+
+  it("decodes Cloudflare-protected direct email evidence from an official page", () => {
+    const html = `
+      <section>
+        <h2>Sarah Lee</h2>
+        <p>Chief Operating Officer</p>
+        <a href="/cdn-cgi/l/email-protection">
+          <span class="__cf_email__" data-cfemail="12617360737a3c7e777752776a737f627e7770737c793c717d7f">[email protected]</span>
+        </a>
+      </section>
+    `
+
+    expect(extractNamedPublicContacts(html, "examplebank.com")).toEqual([
+      {
+        name: "Sarah Lee",
+        role: "Chief Operating Officer",
+        email: "sarah.lee@examplebank.com",
+      },
+    ])
+  })
+
+  it("decodes explicitly published bracket-obfuscated direct emails", () => {
+    const html = `
+      <section>
+        <h2>Daniel Moore</h2>
+        <p>Executive Vice President</p>
+        <p>daniel.moore [at] examplebank [dot] com</p>
+      </section>
+    `
+
+    expect(extractNamedPublicContacts(html, "examplebank.com")).toEqual([
+      {
+        name: "Daniel Moore",
+        role: "Executive Vice President",
+        email: "daniel.moore@examplebank.com",
+      },
+    ])
+  })
+
   it("rejects generic role mailboxes even when displayed publicly", () => {
     const html = `
       <section>
