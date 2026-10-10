@@ -308,6 +308,14 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
            WHERE ct.account_id=a.id
              AND ct.status IN ('active','research_only')
          )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM audit_events ae
+           WHERE ae.category='contacts'
+             AND ae.action='apollo_enrichment_spend'
+             AND json_extract(ae.detail_json,'$.account_id')=a.id
+             AND ae.created_at >= datetime('now','-30 day')
+         )
        ORDER BY cc.score DESC, cc.created_at ASC
        LIMIT 1
      )
