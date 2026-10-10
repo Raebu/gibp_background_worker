@@ -364,7 +364,7 @@ async function processApolloEnrichment(env: Env) {
   const outcome = await enrichApolloCandidateEmail(env, account, candidate)
   return {
     attempted: 1,
-    enriched: outcome.enriched ? 1 : 0,
+    enriched_contacts: outcome.enriched ? 1 : 0,
     account_id: account.id,
     candidate_id: candidate.id,
     ...outcome,
