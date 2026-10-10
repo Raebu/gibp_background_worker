@@ -295,7 +295,7 @@ jobs:
               (SELECT COUNT(*) FROM accounts WHERE status='qualified') AS qualified_accounts,
               (SELECT COUNT(*) FROM contacts WHERE status='active') AS active_contacts,
               (SELECT COUNT(*) FROM contacts WHERE status='active' AND name IS NOT NULL AND length(trim(name))>0) AS named_active_contacts,
-              (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='public_scan' AND created_at >= datetime('now','-7 day')) AS contact_scans_last_7d,
+              (SELECT COUNT(*) FROM audit_events WHERE category='contacts' AND action='public_scan_v2' AND created_at >= datetime('now','-7 day')) AS contact_scans_last_7d,
               (SELECT COUNT(*) FROM conversations) AS conversations,
               (SELECT COUNT(*) FROM messages WHERE direction='simulation') AS simulations,
               (SELECT COUNT(*) FROM messages WHERE direction='outbound') AS real_outbound,
@@ -312,9 +312,9 @@ jobs:
           npx wrangler d1 execute GROWTH_DB --remote --json --command "
             SELECT category,action,entity_id,detail_json,created_at
             FROM audit_events
-            WHERE category IN ('discovery','procurement','ai')
+            WHERE category IN ('discovery','procurement','contacts','ai')
             ORDER BY created_at DESC
-            LIMIT 25;
+            LIMIT 40;
           " | tee /tmp/discovery-diagnostics.json
 
       - name: Confirm deployment configuration remained dry-run
