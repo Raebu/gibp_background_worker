@@ -3,7 +3,7 @@ import { aiJson } from "./ai"
 import { audit, getSetting, id, nowIso, setSetting } from "./db"
 
 const defaultQuery =
-  '("payment modernization" OR "payments transformation" OR "cross-border payments" OR "ISO 20022" OR "instant payments" OR "transaction banking" OR "liquidity management")'
+  '("payment modernization" OR "payments transformation" OR "cross-border payments" OR "ISO 20022" OR "instant payments" OR "transaction banking" OR "liquidity management" OR "treasury transformation" OR "open banking" OR stablecoin OR "digital assets" OR "correspondent banking" OR "head of payments" OR "payments hiring" OR "payments RFP" OR "regulatory remediation")'
 
 function normalizeDomain(value: string) {
   return value
@@ -1057,7 +1057,13 @@ Do not invent customers, regulatory status, integrations or facts not present in
 
   const fitScore = Math.max(0, Math.min(100, Number(analysis?.fit_score ?? account.fit_score ?? 0)))
   const signalScore = Math.max(0, Math.min(100, Number(signal?.max_strength || 0) * 2))
-  const totalScore = Math.max(0, Math.min(100, Math.round(fitScore * 0.65 + signalScore * 0.35)))
+  const totalScore = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(fitScore * 0.65 + signalScore * 0.35 + Number(account.priority_adjustment || 0)),
+    ),
+  )
 
   await env.GROWTH_DB.prepare(
     `UPDATE accounts
