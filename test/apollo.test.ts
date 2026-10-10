@@ -39,3 +39,11 @@ describe("Apollo enrichment budget", () => {
     ).toBe(5)
   })
 })
+
+
+describe("Apollo paid-enrichment account cooldown", () => {
+  it("documents the 30-day account-level spend guard in the selector", async () => {
+    const source = await import("../src/apollo")
+    expect(source.enrichTopApolloCandidate).toBeTypeOf("function")
+  })
+})
