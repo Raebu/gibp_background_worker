@@ -323,6 +323,7 @@ Apollo People Search can populate named senior candidates without revealing thei
 When enabled later:
 
 - one candidate is processed per queue invocation;
+- after any paid Apollo match attempt, that account is excluded from further paid enrichment for 30 days;
 - the daily cap is clamped to at most 5;
 - standard work-email match only;
 - no phone reveal;
