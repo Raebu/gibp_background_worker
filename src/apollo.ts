@@ -206,14 +206,35 @@ type ApolloCandidateRow = {
   country_code: string | null
 }
 
-function emailMatchesAccountDomain(email: string, domain: string) {
-  const emailDomain = email.split("@")[1]?.toLowerCase() || ""
-  const normalized = domain
+function normalizeDomain(domain: string) {
+  return domain
     .replace(/^https?:\/\//i, "")
     .replace(/^www\./i, "")
     .split("/")[0]
+    .trim()
     .toLowerCase()
-  return emailDomain === normalized || emailDomain.endsWith(`.${normalized}`)
+}
+
+async function emailMatchesAccountDomain(env: Env, accountId: string, email: string, domain: string) {
+  const emailDomain = normalizeDomain(email.split("@")[1] || "")
+  const normalized = normalizeDomain(domain)
+
+  if (emailDomain === normalized || emailDomain.endsWith(`.${normalized}`)) {
+    return true
+  }
+
+  const aliases = await env.GROWTH_DB.prepare(
+    `SELECT domain
+     FROM account_email_domains
+     WHERE account_id=?`,
+  )
+    .bind(accountId)
+    .all<{ domain: string }>()
+
+  return (aliases.results || []).some((row) => {
+    const alias = normalizeDomain(String(row.domain || ""))
+    return alias.length > 0 && (emailDomain === alias || emailDomain.endsWith(`.${alias}`))
+  })
 }
 
 export function apolloEnrichmentDailyCap(env: Env) {
@@ -369,7 +390,7 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
     let rejectionReason = ""
     if (!email) rejectionReason = "missing_work_email"
     else if (emailStatus !== "verified") rejectionReason = "work_email_not_verified"
-    else if (!emailMatchesAccountDomain(email, candidate.account_domain)) rejectionReason = "corporate_domain_mismatch"
+    else if (!(await emailMatchesAccountDomain(env, candidate.account_id, email, candidate.account_domain))) rejectionReason = "corporate_domain_mismatch"
     else if (isGenericRoleAddress(email)) rejectionReason = "generic_role_address"
     else if (!name || name.length < 3) rejectionReason = "full_name_missing"
     else if (titleScore < 75) rejectionReason = "role_below_threshold"
