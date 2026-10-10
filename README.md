@@ -330,6 +330,7 @@ When enabled later:
 - no waterfall enrichment;
 - the returned work email must be Apollo-verified;
 - the address must match the target organisation's corporate domain;
+- explicitly verified alternate corporate email domains may be accepted only when backed by a first-party source and stored against that account;
 - generic role inboxes are rejected;
 - matched records are stored as `research_only`, not `active`, so enrichment alone cannot trigger outreach.
 
