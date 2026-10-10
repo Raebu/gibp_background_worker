@@ -1,6 +1,6 @@
 import type { Env } from "./types"
 import { aiJson } from "./ai"
-import { audit, id, nowIso } from "./db"
+import { audit, getSetting, id, nowIso, setSetting } from "./db"
 import { sendInternalResend } from "./email"
 
 const partnerQuery =
@@ -11,6 +11,17 @@ const procurementKeywords =
 
 function clampScore(value: unknown) {
   return Math.max(0, Math.min(100, Number(value || 0)))
+}
+
+async function gdeltBackoffActive(env: Env) {
+  const until = await getSetting(env, "gdelt_backoff_until")
+  return Boolean(until && new Date(until).getTime() > Date.now())
+}
+
+async function activateGdeltBackoff(env: Env, source: string) {
+  const until = new Date(Date.now() + 24 * 3600_000).toISOString()
+  await setSetting(env, "gdelt_backoff_until", until)
+  await audit(env, "discovery", "gdelt_backoff", "source", source, { until })
 }
 
 async function upsertPartnerAccount(
@@ -73,6 +84,10 @@ async function upsertPartnerAccount(
 }
 
 export async function discoverPartnerCandidates(env: Env) {
+  if (await gdeltBackoffActive(env)) {
+    return { articles: 0, organisations: 0, skipped: true, reason: "gdelt_backoff" }
+  }
+
   const url = new URL("https://api.gdeltproject.org/api/v2/doc/doc")
   url.searchParams.set("query", env.PARTNER_DISCOVERY_QUERY || partnerQuery)
   url.searchParams.set("mode", "ArtList")
@@ -85,6 +100,7 @@ export async function discoverPartnerCandidates(env: Env) {
     await audit(env, "discovery", "partner_feed_failed", "source", "gdelt", {
       status: response.status,
     })
+    if (response.status === 429) await activateGdeltBackoff(env, "gdelt_partner")
     return { articles: 0, organisations: 0 }
   }
 
@@ -309,6 +325,10 @@ async function fetchOcdsFeed(env: Env, source: string, endpoint: string) {
 }
 
 async function discoverGlobalProcurementSignals(env: Env) {
+  if (await gdeltBackoffActive(env)) {
+    return 0
+  }
+
   const query =
     '("request for proposal" OR tender OR procurement) ("payments" OR "transaction banking" OR "financial infrastructure" OR "cross-border payments" OR "payment platform")'
   const url = new URL("https://api.gdeltproject.org/api/v2/doc/doc")
@@ -325,6 +345,7 @@ async function discoverGlobalProcurementSignals(env: Env) {
         status: response.status,
         retry_after: response.headers.get("retry-after"),
       })
+      if (response.status === 429) await activateGdeltBackoff(env, "gdelt_procurement")
       return 0
     }
     const payload = (await response.json()) as {

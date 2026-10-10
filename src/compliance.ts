@@ -2,6 +2,14 @@ import type { Account, Contact, Env } from "./types"
 import { countToday } from "./db"
 import { currentNewOutreachCap } from "./ramp"
 
+const genericMailboxPattern =
+  /^(info|contact|hello|enquiries?|inquiries?|support|sales|commercial|office|admin|marketing|press|media|privacy|security|abuse|help|customerservice|customer\.service|partnerships?|alliances?|procurement|supplier|vendors?)\d*$/i
+
+export function isGenericRoleAddress(email: string) {
+  const local = email.split("@")[0]?.toLowerCase().replace(/[._+-]/g, "") || ""
+  return !local || genericMailboxPattern.test(local)
+}
+
 const freeMailDomains = new Set([
   "gmail.com",
   "outlook.com",
@@ -24,12 +32,14 @@ export async function canSendTo(
   isInitial: boolean,
 ): Promise<ComplianceDecision> {
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
-  if (!contact.is_public && contact.consent_status !== "express") {
+  if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }
+  if (isGenericRoleAddress(contact.email)) return { allowed: false, reason: "generic_role_address_blocked" }
+  if (!contact.is_public && !["express", "implied"].includes(contact.consent_status)) {
     return { allowed: false, reason: "email_not_public_or_consented" }
   }
 
   const domain = contact.email.split("@")[1]?.toLowerCase()
-  if (!domain || freeMailDomains.has(domain)) {
+  if (!domain || freeMailDomains.has(domain) || !contact.verified) {
     return { allowed: false, reason: "not_verified_corporate_email" }
   }
 
