@@ -5,6 +5,43 @@ import { audit, getSetting, id, nowIso, setSetting } from "./db"
 const defaultQuery =
   '("payment modernization" OR "payments transformation" OR "cross-border payments" OR "ISO 20022" OR "instant payments" OR "transaction banking" OR "liquidity management" OR "treasury transformation" OR "open banking" OR stablecoin OR "digital assets" OR "correspondent banking" OR "head of payments" OR "payments hiring" OR "payments RFP" OR "regulatory remediation")'
 
+const allowedSignalKinds = new Set([
+  "payments_transformation",
+  "iso_20022",
+  "instant_payments",
+  "cross_border",
+  "liquidity_treasury",
+  "digital_assets",
+  "open_banking",
+  "executive_change",
+  "hiring",
+  "procurement",
+  "regulatory_remediation",
+  "partnership",
+  "market_expansion",
+  "news_trigger",
+])
+
+export function normalizeBuyingSignalKind(value: unknown, title: string) {
+  const requested = String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "")
+  if (allowedSignalKinds.has(requested)) return requested
+  const text = title.toLowerCase()
+  if (/iso\s*20022/.test(text)) return "iso_20022"
+  if (/instant payment|real[- ]time payment|faster payment/.test(text)) return "instant_payments"
+  if (/cross[- ]border|correspondent/.test(text)) return "cross_border"
+  if (/liquidity|treasury/.test(text)) return "liquidity_treasury"
+  if (/stablecoin|digital asset|tokeni[sz]/.test(text)) return "digital_assets"
+  if (/open banking|open finance/.test(text)) return "open_banking"
+  if (/appoint|named .*head|chief .* officer|head of payments/.test(text)) return "executive_change"
+  if (/hiring|recruit|vacanc|job/.test(text)) return "hiring"
+  if (/rfp|tender|procurement|supplier/.test(text)) return "procurement"
+  if (/remediation|regulat|compliance/.test(text)) return "regulatory_remediation"
+  if (/partner|partnership|alliance/.test(text)) return "partnership"
+  if (/expand|launch.*market|new market/.test(text)) return "market_expansion"
+  if (/moderni[sz]|transform|orchestrat/.test(text)) return "payments_transformation"
+  return "news_trigger"
+}
+
 function normalizeDomain(value: string) {
   return value
     .replace(/^https?:\/\//i, "")
@@ -922,12 +959,13 @@ export async function discoverNewsCandidates(env: Env) {
   if (!articles.length) return { articles: 0, organisations: 0 }
 
   const extracted =
-    (await aiJson<Array<{ name: string; account_type: string; article_index: number; strength: number }>>(
+    (await aiJson<Array<{ name: string; account_type: string; article_index: number; strength: number; signal_kind?: string }>>(
       env,
       `Extract target organisations for institutional GIBP business development.
 Return a JSON array only. Include banks, payment companies, fintech platforms, treasury/payment technology providers, liquidity providers, clearing/settlement networks, market infrastructure firms and systems integrators.
 Do not return journalists, governments, people, trade bodies unless they are potential technology/commercial partners.
-Use exact organisation names from the titles. strength must be 1-40.`,
+Use exact organisation names from the titles. strength must be 1-40.
+signal_kind must be one of: payments_transformation, iso_20022, instant_payments, cross_border, liquidity_treasury, digital_assets, open_banking, executive_change, hiring, procurement, regulatory_remediation, partnership, market_expansion, news_trigger.`,
       articles
         .map((article, index) => `${index}: ${article.title}`)
         .join("\n")
@@ -962,11 +1000,12 @@ Use exact organisation names from the titles. strength must be 1-40.`,
     await env.GROWTH_DB.prepare(
       `INSERT OR IGNORE INTO signals
         (id,account_id,kind,title,url,source,observed_at,strength,raw_json,created_at)
-       VALUES (?,?, 'news_trigger', ?, ?, 'gdelt', ?, ?, ?, ?)`,
+       VALUES (?,?,?,?,?,'gdelt',?,?,?,?)`,
     )
       .bind(
         id(),
         accountId,
+        normalizeBuyingSignalKind(candidate.signal_kind, article.title),
         article.title,
         article.url,
         article.seendate || now,
