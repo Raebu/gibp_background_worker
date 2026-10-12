@@ -113,9 +113,15 @@ export async function claimWebhookEvent(env: Env, event: any) {
 
   const data = event?.data || {}
   const result = await env.GROWTH_DB.prepare(
-    `INSERT OR IGNORE INTO webhook_events
-      (event_key,event_type,provider_id,received_at,payload_json)
-     VALUES (?,?,?,?,?)`,
+    `INSERT INTO webhook_events
+      (event_key,event_type,provider_id,status,received_at,payload_json)
+     VALUES (?,?,?,'processing',?,?)
+     ON CONFLICT(event_key) DO UPDATE SET
+       status='processing',
+       received_at=excluded.received_at,
+       error=NULL,
+       payload_json=excluded.payload_json
+     WHERE webhook_events.status='failed'`,
   ).bind(
     key,
     String(event?.type || "unknown"),
@@ -125,6 +131,23 @@ export async function claimWebhookEvent(env: Env, event: any) {
   ).run()
 
   return { claimed: Number(result.meta?.changes || 0) > 0, event_key: key }
+}
+
+export async function markWebhookProcessed(env: Env, eventKey: string | null) {
+  if (!eventKey) return
+  await env.GROWTH_DB.prepare(
+    "UPDATE webhook_events SET status='processed',processed_at=?,error=NULL WHERE event_key=?",
+  ).bind(nowIso(), eventKey).run()
+}
+
+export async function markWebhookFailed(env: Env, eventKey: string | null, error: unknown) {
+  if (!eventKey) return
+  await env.GROWTH_DB.prepare(
+    "UPDATE webhook_events SET status='failed',error=? WHERE event_key=?",
+  ).bind(
+    String(error instanceof Error ? error.message : error).slice(0, 2000),
+    eventKey,
+  ).run()
 }
 
 export async function recordOperationsAlert(
