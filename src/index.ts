@@ -316,6 +316,15 @@ async function handleAdmin(request: Request, env: Env, path: string) {
     return json(rows.results || [])
   }
 
+  if (path === "/admin/product-users" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT * FROM product_user_lifecycle
+       ORDER BY CASE health_status WHEN 'expansion' THEN 0 WHEN 'watch' THEN 1 WHEN 'dormant' THEN 2 ELSE 3 END,
+                expansion_score DESC,updated_at DESC LIMIT 1000`,
+    ).all()
+    return json(rows.results || [])
+  }
+
   if (path === "/admin/operations" && request.method === "GET") {
     const alerts = await env.GROWTH_DB.prepare(
       "SELECT * FROM operations_alerts WHERE status='open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 100",
