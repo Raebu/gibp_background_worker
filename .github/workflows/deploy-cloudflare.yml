@@ -139,7 +139,7 @@ jobs:
           fi
           echo "Controlled live-ramp preflight passed with $ELIGIBLE policy-current QEV-safe named contacts."
 
-      - name: Deploy Worker in configured mode
+      - name: Upload and activate exact Worker version
         shell: bash
         run: |
           set -euo pipefail
@@ -152,87 +152,136 @@ jobs:
           fs.writeFileSync("wrangler.jsonc", JSON.stringify(config, null, 2) + "\n")
           NODE
 
-          set +e
-          timeout --signal=TERM --kill-after=15s 120s npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
-          WRANGLER_STATUS=${PIPESTATUS[0]}
-          set -e
+          SERVICE_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/gibp-background-worker"
+          for attempt in $(seq 1 12); do
+            if curl --fail --silent --show-error \
+              --connect-timeout 5 --max-time 12 \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "$SERVICE_URL" | jq -e '.success == true' >/dev/null; then
+              echo "Cloudflare Worker service control plane is healthy."
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              echo "Cloudflare Worker service endpoint remained unavailable."
+              exit 1
+            fi
+            sleep 8
+          done
 
-          if [ "$WRANGLER_STATUS" -eq 124 ] || [ "$WRANGLER_STATUS" -eq 137 ]; then
-            echo "Wrangler publish exceeded the hard timeout; switching to Cloudflare API fallback."
+          TAG="release-${GITHUB_SHA:0:12}"
+          VERSION_ID=""
+          for attempt in 1 2 3 4; do
+            echo "Version upload attempt $attempt/4"
+            set +e
+            timeout --signal=TERM --kill-after=15s 90s \
+              npx wrangler versions upload \
+                --message "GitHub production release $GITHUB_SHA" \
+                --tag "$TAG" \
+                2>&1 | tee /tmp/version-upload.log
+            UPLOAD_STATUS=${PIPESTATUS[0]}
+            set -e
+
+            VERSION_ID="$(
+              grep -Eo '(Worker )?Version ID:[[:space:]]*[a-fA-F0-9-]+' /tmp/version-upload.log \
+                | tail -1 \
+                | sed -E 's/.*Version ID:[[:space:]]*//' \
+                || true
+            )"
+
+            if [ "$UPLOAD_STATUS" -eq 0 ] && [ -n "$VERSION_ID" ]; then
+              echo "$VERSION_ID" | grep -Eq '^[a-fA-F0-9-]{32,40}$'
+              echo "Uploaded exact production Worker version: $VERSION_ID"
+              break
+            fi
+
+            VERSION_ID=""
+            if [ "$attempt" -eq 4 ]; then
+              echo "Unable to upload an exact production Worker version."
+              exit "${UPLOAD_STATUS:-1}"
+            fi
+            sleep $((attempt * 5))
+          done
+
+          test -n "$VERSION_ID"
+          echo "VERSION_ID=$VERSION_ID" >> "$GITHUB_ENV"
+
+          DEPLOYED=false
+          for attempt in 1 2 3; do
+            echo "Exact version activation attempt $attempt/3"
+            set +e
+            timeout --signal=TERM --kill-after=15s 90s \
+              npx wrangler versions deploy "$VERSION_ID@100%" -y \
+                --message "Exact GitHub production release $GITHUB_SHA" \
+                2>&1 | tee /tmp/version-deploy.log
+            DEPLOY_STATUS=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$DEPLOY_STATUS" -eq 0 ]; then
+              DEPLOYED=true
+              break
+            fi
+
+            # A Cloudflare parser/control-plane failure may happen after traffic
+            # has already moved. Prove the exact release before retrying.
+            if curl --fail --silent --show-error \
+              --connect-timeout 8 --max-time 20 \
+              "https://growth.gibp.global/health" -o /tmp/post-deploy-health.json \
+              && jq -e --arg sha "$GITHUB_SHA" \
+                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                /tmp/post-deploy-health.json >/dev/null; then
+              echo "Production already serves the exact SHA despite Wrangler status $DEPLOY_STATUS."
+              DEPLOYED=true
+              break
+            fi
+
+            sleep $((attempt * 5))
+          done
+
+          if [ "$DEPLOYED" != "true" ]; then
+            echo "Exact Worker version could not be activated."
+            exit 1
           fi
 
-          if [ "$WRANGLER_STATUS" -ne 0 ]; then
-            echo "Wrangler returned non-zero; checking for a successfully-created Worker version."
+          # versions upload intentionally separates versioned code from routes,
+          # custom domains and cron triggers. Apply those config surfaces
+          # explicitly and fail closed if Cloudflare cannot confirm them.
+          TRIGGERS_OK=false
+          for attempt in 1 2 3; do
+            echo "Trigger sync attempt $attempt/3"
+            set +e
+            timeout --signal=TERM --kill-after=15s 60s \
+              npx wrangler triggers deploy 2>&1 | tee /tmp/triggers-deploy.log
+            TRIGGER_STATUS=${PIPESTATUS[0]}
+            set -e
 
-            VERSIONS_JSON=""
-            for attempt in 1 2 3 4 5; do
-              if VERSIONS_JSON="$(curl --fail --silent --show-error \
-                --connect-timeout 10 --max-time 30 \
-                --retry 2 --retry-delay 2 --retry-all-errors \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/versions?per_page=20")"; then
-                break
-              fi
-              sleep $((attempt * 5))
-            done
+            if [ "$TRIGGER_STATUS" -eq 0 ]; then
+              TRIGGERS_OK=true
+              break
+            fi
+            sleep $((attempt * 5))
+          done
 
-            echo "$VERSIONS_JSON" | jq -e '.success == true' >/dev/null
-            VERSION_ID="$(echo "$VERSIONS_JSON" | jq -r '
-              (.result // [])
-              | if type == "array" then . else (.items // .versions // []) end
-              | sort_by(.number // 0)
-              | last
-              | .id // empty
-            ')"
-            test -n "$VERSION_ID"
-            echo "Cloudflare fallback selected newest uploaded Worker version: $VERSION_ID"
-
-            DEPLOY_BODY="$(jq -cn \
-              --arg version "$VERSION_ID" \
-              --arg sha "$GITHUB_SHA" \
-              '{
-                strategy:"percentage",
-                versions:[{version_id:$version,percentage:100}],
-                annotations:{
-                  "workers/message":("GitHub release " + $sha + " activated after Wrangler response-parser failure"),
-                  "workers/triggered_by":"github-actions-fallback"
-                }
-              }')"
-
-            DEPLOY_RESPONSE=""
-            for attempt in 1 2 3 4 5; do
-              if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
-                --connect-timeout 10 --max-time 30 \
-                --retry 2 --retry-delay 2 --retry-all-errors \
-                -X POST \
-                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "$DEPLOY_BODY" \
-                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"; then
-                break
-              fi
-              sleep $((attempt * 5))
-            done
-            echo "$DEPLOY_RESPONSE" | jq -e '.success == true' >/dev/null
-            echo "Cloudflare API fallback activated Worker version $VERSION_ID."
+          if [ "$TRIGGERS_OK" != "true" ]; then
+            echo "Worker code is live, but routes/domains/cron trigger sync could not be proven."
+            exit 1
           fi
 
-          WORKER_URL="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/wrangler-deploy.log | tail -1)"
-          if [ -z "$WORKER_URL" ]; then
-            WORKER_URL="https://growth.gibp.global"
-          fi
-          echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
+          echo "WORKER_URL=https://growth.gibp.global" >> "$GITHUB_ENV"
 
       - name: Verify public Worker health
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5; do
-            if curl --fail --silent --show-error "$WORKER_URL/health" | tee /tmp/health.json; then
-              grep -q '"ok":true' /tmp/health.json
-              grep -q '"mode":"live"' /tmp/health.json
-              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/health.json
-              exit 0
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error "$WORKER_URL/health" -o /tmp/health.json; then
+              cat /tmp/health.json
+              if jq -e --arg sha "$GITHUB_SHA" \
+                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                /tmp/health.json >/dev/null; then
+                exit 0
+              fi
+              OBSERVED_SHA="$(jq -r '.release_sha // "missing"' /tmp/health.json 2>/dev/null || echo invalid_json)"
+              echo "Health is live but still serving $OBSERVED_SHA ($attempt/20)."
             fi
             sleep 3
           done
@@ -242,12 +291,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in 1 2 3 4 5 6 7 8; do
-            if curl --fail --silent --show-error "https://growth.gibp.global/health" | tee /tmp/branded-health.json; then
-              grep -q '"ok":true' /tmp/branded-health.json
-              grep -q '"mode":"live"' /tmp/branded-health.json
-              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/branded-health.json
-              exit 0
+          for attempt in $(seq 1 24); do
+            if curl --fail --silent --show-error "https://growth.gibp.global/health" -o /tmp/branded-health.json; then
+              cat /tmp/branded-health.json
+              if jq -e --arg sha "$GITHUB_SHA" \
+                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                /tmp/branded-health.json >/dev/null; then
+                exit 0
+              fi
+              OBSERVED_SHA="$(jq -r '.release_sha // "missing"' /tmp/branded-health.json 2>/dev/null || echo invalid_json)"
+              echo "Branded domain still serves $OBSERVED_SHA ($attempt/24)."
             fi
             sleep 5
           done
