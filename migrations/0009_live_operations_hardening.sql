@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   event_key TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
   provider_id TEXT,
+  status TEXT NOT NULL DEFAULT 'processing',
   received_at TEXT NOT NULL,
+  processed_at TEXT,
+  error TEXT,
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
 
