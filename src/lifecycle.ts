@@ -1,5 +1,6 @@
 import type { Account, Contact, Conversation, Env } from "./types"
 import { audit, daysFromNow, id, nowIso } from "./db"
+import { googleCalendarConfigured, prepareNativeGoogleMeeting } from "./google"
 
 const countryTimezones: Record<string, string> = {
   GB: "Europe/London",
@@ -222,6 +223,24 @@ export async function requestMeetingBooking(
       status = "provider_error"
       providerResponse = { error: error instanceof Error ? error.message : "unknown" }
     }
+  } else if (googleCalendarConfigured(env)) {
+    try {
+      const native = await prepareNativeGoogleMeeting(env, requestId)
+      if (native) {
+        status = native.status
+        bookingUrl = native.booking_url || null
+        providerResponse = {
+          provider: "google_calendar",
+          slots: native.slots || [],
+        }
+      }
+    } catch (error) {
+      status = "provider_error"
+      providerResponse = {
+        provider: "google_calendar",
+        error: error instanceof Error ? error.message : "unknown",
+      }
+    }
   }
 
   await env.GROWTH_DB.prepare(
@@ -238,7 +257,14 @@ export async function requestMeetingBooking(
     status,
     scheduled_at: scheduledAt,
     booking_url: Boolean(bookingUrl),
-    provider_configured: Boolean(env.MEETING_BOOKING_WEBHOOK_URL),
+    provider:
+      env.MEETING_BOOKING_WEBHOOK_URL
+        ? "webhook"
+        : googleCalendarConfigured(env)
+          ? "google_calendar"
+          : env.BOOKING_URL
+            ? "booking_url"
+            : "none",
   })
 
   return { id: requestId, status, booking_url: bookingUrl, scheduled_at: scheduledAt }
