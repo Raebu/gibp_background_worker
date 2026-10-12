@@ -528,6 +528,7 @@ export default {
       { kind: "dossiers" },
       ...Array.from({ length: contactScans }, () => ({ kind: "contacts" as const })),
       { kind: "apollo_candidates" },
+      { kind: "apollo_enrich" },
       { kind: "email_verify" },
       { kind: "conversations" },
       { kind: "nurture" },
