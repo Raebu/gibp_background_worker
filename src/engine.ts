@@ -552,6 +552,28 @@ async function processOutreachSimulationCommissioning(env: Env) {
     return { generated: 0, skipped: true, reason: "send_mode_live" }
   }
 
+  const existing = await env.GROWTH_DB.prepare(
+    `SELECT DISTINCT
+       json_extract(detail_json,'$.account_id') AS account_id
+     FROM audit_events
+     WHERE category='engine'
+       AND action='outreach_simulation_commissioned'
+       AND json_extract(detail_json,'$.account_id') IS NOT NULL`,
+  ).all<{ account_id: string }>()
+
+  const commissionedAccounts = new Set(
+    (existing.results || []).map((row) => row.account_id).filter(Boolean),
+  )
+  const targetDistinctAccounts = 3
+  if (commissionedAccounts.size >= targetDistinctAccounts) {
+    return {
+      generated: 0,
+      skipped: true,
+      reason: "diversity_target_already_met",
+      distinct_accounts: commissionedAccounts.size,
+    }
+  }
+
   const rows = await env.GROWTH_DB.prepare(
     `SELECT c.*
      FROM conversations c
@@ -563,16 +585,28 @@ async function processOutreachSimulationCommissioning(env: Env) {
        AND ct.status='active'
        AND ct.name IS NOT NULL
        AND length(trim(ct.name)) > 0
+       AND ct.role IS NOT NULL
+       AND length(trim(ct.role)) > 0
        AND ct.verified=1
        AND a.status='qualified'
      ORDER BY a.score DESC,ct.seniority_score DESC,c.created_at ASC
-     LIMIT 40`,
+     LIMIT 80`,
   ).all<Conversation>()
 
+  const proofs: Array<{
+    conversation_id: string
+    account_id: string
+    contact_id: string
+    contact_role: string
+    classification: string
+  }> = []
+
   for (const conversation of rows.results || []) {
+    if (commissionedAccounts.has(conversation.account_id)) continue
+
     const account = await accountFor(env, conversation.account_id)
     const contact = await contactFor(env, conversation.contact_id)
-    if (!account || !contact) continue
+    if (!account || !contact?.role?.trim()) continue
 
     const isInitial = conversation.outbound_count === 0
     const decision = await canSendTo(env, account, contact, isInitial)
@@ -605,29 +639,39 @@ async function processOutreachSimulationCommissioning(env: Env) {
         timing_bypass_only: true,
         compliance_reason: decision.reason,
         step,
+        diversity_proof: true,
       },
     )
 
     await audit(env, "engine", "outreach_simulation_commissioned", "conversation", conversation.id, {
       account_id: account.id,
       contact_id: contact.id,
+      contact_role: contact.role,
       classification,
       timing_bypass_only: true,
       live_send: false,
+      diversity_proof: true,
     })
 
-    return {
-      generated: 1,
+    commissionedAccounts.add(account.id)
+    proofs.push({
       conversation_id: conversation.id,
       account_id: account.id,
       contact_id: contact.id,
+      contact_role: contact.role,
       classification,
-      compliance_reason: decision.reason,
-      live_send: false,
-    }
+    })
+
+    if (commissionedAccounts.size >= targetDistinctAccounts) break
   }
 
-  return { generated: 0, skipped: true, reason: "no_compliance_eligible_conversation" }
+  return {
+    generated: proofs.length,
+    distinct_accounts: commissionedAccounts.size,
+    target_distinct_accounts: targetDistinctAccounts,
+    proofs,
+    live_send: false,
+  }
 }
 
 async function createHandoff(
