@@ -23,6 +23,12 @@ jobs:
       RESEND_WEBHOOK_SECRET: ${{ secrets.RESEND_WEBHOOK_SECRET }}
       APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
       QUICKEMAILVERIFICATION_API_KEY: ${{ secrets.QUICKEMAILVERIFICATION_API_KEY }}
+      GSC_GOOGLE_CLIENT_ID: ${{ secrets.GSC_GOOGLE_CLIENT_ID }}
+      GSC_GOOGLE_CLIENT_SECRET: ${{ secrets.GSC_GOOGLE_CLIENT_SECRET }}
+      GSC_GOOGLE_REFRESH_TOKEN: ${{ secrets.GSC_GOOGLE_REFRESH_TOKEN }}
+      CALENDAR_GOOGLE_CLIENT_ID: ${{ secrets.CALENDAR_GOOGLE_CLIENT_ID }}
+      CALENDAR_GOOGLE_CLIENT_SECRET: ${{ secrets.CALENDAR_GOOGLE_CLIENT_SECRET }}
+      CALENDAR_GOOGLE_REFRESH_TOKEN: ${{ secrets.CALENDAR_GOOGLE_REFRESH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -157,6 +163,29 @@ jobs:
           else
             echo "QUICKEMAILVERIFICATION_API_KEY is not configured; email verification will skip safely."
           fi
+
+      - name: Sync optional Google growth integrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sync_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | npx wrangler secret put "$name" >/dev/null
+              echo "$name configured."
+            else
+              echo "$name not configured; related Google integration will skip safely."
+            fi
+          }
+
+          sync_secret GSC_GOOGLE_CLIENT_ID "${GSC_GOOGLE_CLIENT_ID:-}"
+          sync_secret GSC_GOOGLE_CLIENT_SECRET "${GSC_GOOGLE_CLIENT_SECRET:-}"
+          sync_secret GSC_GOOGLE_REFRESH_TOKEN "${GSC_GOOGLE_REFRESH_TOKEN:-}"
+          sync_secret CALENDAR_GOOGLE_CLIENT_ID "${CALENDAR_GOOGLE_CLIENT_ID:-}"
+          sync_secret CALENDAR_GOOGLE_CLIENT_SECRET "${CALENDAR_GOOGLE_CLIENT_SECRET:-}"
+          sync_secret CALENDAR_GOOGLE_REFRESH_TOKEN "${CALENDAR_GOOGLE_REFRESH_TOKEN:-}"
 
       - name: Verify QuickEmailVerification integration in sandbox
         shell: bash
