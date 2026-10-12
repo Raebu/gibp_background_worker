@@ -395,7 +395,12 @@ export default {
     const url = new URL(request.url)
 
     if (url.pathname === "/health") {
-      return json({ ok: true, service: "gibp-background-worker", mode: env.SEND_MODE || "dry_run" })
+      return json({
+        ok: true,
+        service: "gibp-background-worker",
+        mode: env.SEND_MODE || "dry_run",
+        release_sha: env.RELEASE_SHA || null,
+      })
     }
 
     if (url.pathname === "/dashboard/login" && request.method === "POST") {
