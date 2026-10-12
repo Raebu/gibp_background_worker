@@ -1,6 +1,12 @@
 import type { Env, GrowthJob } from "./types"
 import { handleResendEvent, importData, metrics, recordWebsiteIntent, runQueueJob, runTick } from "./engine"
-import { isAuthorized, isSiteAuthorized, readUnsubscribeToken, verifyResendWebhook } from "./security"
+import {
+  isAuthorized,
+  isSiteAuthorized,
+  readUnsubscribeToken,
+  verifyResendWebhook,
+  verifySupabaseProductUser,
+} from "./security"
 import { nowIso } from "./db"
 import {
   handleConversionRequest,
@@ -386,6 +392,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         quickemailverification: Boolean(env.QUICKEMAILVERIFICATION_API_KEY),
         multi_surface: true,
         sites: ["gibp.global","gibp.app"],
+        supabase_user_auth: Boolean(env.SUPABASE_AUTH_URL && env.SUPABASE_PUBLISHABLE_KEY),
         crm: Boolean(
           env.CRM_WEBHOOK_URL ||
           env.HUBSPOT_PRIVATE_APP_TOKEN ||
@@ -804,18 +811,31 @@ export default {
 
     if (url.pathname === "/events/product") {
       const origin = allowedWebsiteOrigin(request)
-      const trusted = isSiteAuthorized(request, env)
+      const systemTrusted = isSiteAuthorized(request, env)
       if (request.method === "OPTIONS") {
         if (!origin) return unauthorized()
         return websiteJson({ ok: true }, 204, origin)
       }
       if (request.method !== "POST") return websiteJson({ error: "method_not_allowed" }, 405, origin)
-      if (!trusted) return websiteJson({ error: "trusted_product_event_required" }, 401, origin)
-      const body = await bodyJson(request)
+
+      const productUser = systemTrusted ? null : await verifySupabaseProductUser(request, env)
+      if (!systemTrusted && !productUser) {
+        return websiteJson({ error: "trusted_product_event_required" }, 401, origin)
+      }
+      if (!systemTrusted && !websiteRateAllowed(request)) {
+        return websiteJson({ error: "rate_limited" }, 429, origin)
+      }
+
+      const body = await bodyJson(request) as any
       if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
       try {
-        const sourceSite = sourceSiteFromOrigin(origin) || canonicalSourceSite((body as any)?.source_site || (body as any)?.site, "gibp.app")
-        return websiteJson(await recordProductEvent(env, body, { trusted, sourceSite }), 200, origin)
+        const sourceSite = productUser
+          ? "gibp.app"
+          : sourceSiteFromOrigin(origin) || canonicalSourceSite(body?.source_site || body?.site, "gibp.app")
+        const payload = productUser
+          ? { ...body, user_id: productUser.id, email: productUser.email, source_site: "gibp.app" }
+          : body
+        return websiteJson(await recordProductEvent(env, payload, { trusted: true, sourceSite }), 200, origin)
       } catch (error) {
         return websiteJson({ error: error instanceof Error ? error.message : "invalid_product_event" }, 400, origin)
       }

@@ -75,7 +75,9 @@
     "BUSINESS_POSTAL_ADDRESS": "82a James Carter Road, Bury St. Edmunds, IP28 7DE, United Kingdom",
     "HANDOFF_TO": "martin@theraeburngroup.com",
     "GIBP_APPROVED_FACTS": "GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money. GIBP presents responsible providers and applicable terms before any live regulated service. Public information is available at https://www.gibp.global.",
-    "GSC_SITE_URLS": "sc-domain:gibp.global,sc-domain:gibp.app"
+    "GSC_SITE_URLS": "sc-domain:gibp.global,sc-domain:gibp.app",
+    "SUPABASE_AUTH_URL": "https://dwlkofpgejluntxetiff.supabase.co",
+    "SUPABASE_PUBLISHABLE_KEY": "sb_publishable__pumL4XJRZFP-wW127AvQQ_J549M4es"
   },
   "routes": [
     {

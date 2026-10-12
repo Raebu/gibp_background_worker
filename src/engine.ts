@@ -1340,6 +1340,7 @@ export async function recordWebsiteIntent(
     regulatory_view: 8,
     whitepaper: 10,
     architecture: 12,
+    quote: 12,
     contact: 20,
     meeting: 35,
   }

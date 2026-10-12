@@ -44,6 +44,39 @@ export function isSiteAuthorized(request: Request, env: Env) {
   return Boolean(env.SITE_EVENT_TOKEN && token && token === env.SITE_EVENT_TOKEN)
 }
 
+export type VerifiedProductUser = {
+  id: string
+  email: string | null
+}
+
+export async function verifySupabaseProductUser(
+  request: Request,
+  env: Env,
+): Promise<VerifiedProductUser | null> {
+  const token = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "") || ""
+  if (!token || (env.SITE_EVENT_TOKEN && token === env.SITE_EVENT_TOKEN)) return null
+  if (!env.SUPABASE_AUTH_URL || !env.SUPABASE_PUBLISHABLE_KEY) return null
+
+  try {
+    const response = await fetch(`${env.SUPABASE_AUTH_URL.replace(/\/$/, "")}/auth/v1/user`, {
+      method: "GET",
+      headers: {
+        apikey: env.SUPABASE_PUBLISHABLE_KEY,
+        Authorization: `Bearer ${token}`,
+      },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!response.ok) return null
+    const user = await response.json().catch(() => null) as any
+    const id = String(user?.id || "").trim()
+    if (!id) return null
+    const email = user?.email ? String(user.email).trim().toLowerCase() : null
+    return { id, email }
+  } catch {
+    return null
+  }
+}
+
 export async function makeUnsubscribeToken(email: string, env: Env) {
   if (!env.UNSUBSCRIBE_SECRET) throw new Error("UNSUBSCRIBE_SECRET is required")
   const payload = base64Url(encoder.encode(email.toLowerCase()))
