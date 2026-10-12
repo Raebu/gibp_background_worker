@@ -547,6 +547,89 @@ async function processDueConversations(env: Env) {
   return sent
 }
 
+async function processOutreachSimulationCommissioning(env: Env) {
+  if ((env.SEND_MODE || "dry_run") === "live") {
+    return { generated: 0, skipped: true, reason: "send_mode_live" }
+  }
+
+  const rows = await env.GROWTH_DB.prepare(
+    `SELECT c.*
+     FROM conversations c
+     JOIN contacts ct ON ct.id=c.contact_id
+     JOIN accounts a ON a.id=c.account_id
+     WHERE c.state IN ('discovery','engaged')
+       AND c.human_handoff_at IS NULL
+       AND c.outbound_count < 3
+       AND ct.status='active'
+       AND ct.name IS NOT NULL
+       AND length(trim(ct.name)) > 0
+       AND ct.verified=1
+       AND a.status='qualified'
+     ORDER BY a.score DESC,ct.seniority_score DESC,c.created_at ASC
+     LIMIT 40`,
+  ).all<Conversation>()
+
+  for (const conversation of rows.results || []) {
+    const account = await accountFor(env, conversation.account_id)
+    const contact = await contactFor(env, conversation.contact_id)
+    if (!account || !contact) continue
+
+    const isInitial = conversation.outbound_count === 0
+    const decision = await canSendTo(env, account, contact, isInitial)
+    if (!decision.allowed) continue
+
+    const step = conversation.outbound_count + 1
+    const classification = isInitial ? "initial" : `followup_${step}`
+    const copy = await makeOutreach(env, account, contact, conversation, step)
+    const result = await sendResend(env, {
+      to: contact.email,
+      subject: copy.subject,
+      text: copy.text,
+      conversationId: conversation.id,
+      classification,
+    })
+
+    if (!result.dry_run) {
+      throw new Error("Commissioning simulation attempted a live send")
+    }
+
+    await recordSimulation(
+      env,
+      conversation.id,
+      copy.subject,
+      result.text,
+      classification,
+      {
+        dry_run: true,
+        commissioning: true,
+        timing_bypass_only: true,
+        compliance_reason: decision.reason,
+        step,
+      },
+    )
+
+    await audit(env, "engine", "outreach_simulation_commissioned", "conversation", conversation.id, {
+      account_id: account.id,
+      contact_id: contact.id,
+      classification,
+      timing_bypass_only: true,
+      live_send: false,
+    })
+
+    return {
+      generated: 1,
+      conversation_id: conversation.id,
+      account_id: account.id,
+      contact_id: contact.id,
+      classification,
+      compliance_reason: decision.reason,
+      live_send: false,
+    }
+  }
+
+  return { generated: 0, skipped: true, reason: "no_compliance_eligible_conversation" }
+}
+
 async function createHandoff(
   env: Env,
   conversation: Conversation,
@@ -1202,7 +1285,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "search_demand" | "learning" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "outreach_simulation_commissioning" | "authority" | "search_demand" | "learning" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1257,6 +1340,8 @@ export async function runQueueJob(
     result = await refreshNurtureSchedules(env)
   } else if (kind === "outreach") {
     result = { sent: await processDueConversations(env) }
+  } else if (kind === "outreach_simulation_commissioning") {
+    result = await processOutreachSimulationCommissioning(env)
   } else if (kind === "authority") {
     result = await generateAuthorityBriefings(env)
   } else if (kind === "search_demand") {
