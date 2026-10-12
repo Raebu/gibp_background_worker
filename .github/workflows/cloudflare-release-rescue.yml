@@ -126,37 +126,58 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$VERSION_ID"
+          DEPLOY_STATUS=1
 
-          DEPLOY_BODY="$(jq -cn \
-            --arg version "$VERSION_ID" \
-            --arg sha "$GITHUB_SHA" \
-            '{
-              strategy:"percentage",
-              versions:[{version_id:$version,percentage:100}],
-              annotations:{
-                "workers/message":("Exact GitHub rescue release " + $sha),
-                "workers/triggered_by":"github-actions-versioned-rescue"
-              }
-            }')"
+          for attempt in 1 2 3; do
+            echo "Wrangler version activation attempt $attempt/3"
+            set +e
+            timeout --signal=TERM --kill-after=15s 90s \
+              npx wrangler versions deploy "${VERSION_ID}@100%" -y \
+              2>&1 | tee /tmp/version-deploy-attempt.log
+            DEPLOY_STATUS=${PIPESTATUS[0]}
+            set -e
 
-          DEPLOY_RESPONSE=""
-          for attempt in 1 2 3 4 5; do
-            if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
+            if [ "$DEPLOY_STATUS" -eq 0 ]; then
+              echo "Wrangler activated Worker version $VERSION_ID at 100 percent."
+              exit 0
+            fi
+
+            echo "Wrangler activation attempt $attempt failed with status $DEPLOY_STATUS."
+            sleep $((attempt * 5))
+          done
+
+          echo "Wrangler activation did not complete; trying the documented deployment API with a minimal body for one bounded fallback."
+          DEPLOY_BODY="$(jq -cn --arg version "$VERSION_ID" '{strategy:"percentage",versions:[{version_id:$version,percentage:100}]}')"
+
+          for attempt in 1 2 3; do
+            RESPONSE_FILE="/tmp/deploy-response-$attempt.json"
+            set +e
+            HTTP_CODE="$(curl --silent --show-error \
               --connect-timeout 10 --max-time 30 \
-              --retry 1 --retry-delay 2 --retry-all-errors \
+              -o "$RESPONSE_FILE" \
+              -w '%{http_code}' \
               -X POST \
               -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               -H "Content-Type: application/json" \
               --data "$DEPLOY_BODY" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"; then
-              break
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"
+            CURL_STATUS=$?
+            set -e
+
+            echo "Cloudflare deployment API attempt $attempt: curl=$CURL_STATUS http=$HTTP_CODE"
+            cat "$RESPONSE_FILE" || true
+
+            if [ "$CURL_STATUS" -eq 0 ] && [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ] \
+              && jq -e '.success == true' "$RESPONSE_FILE" >/dev/null 2>&1; then
+              echo "Cloudflare API activated Worker version $VERSION_ID at 100 percent."
+              exit 0
             fi
-            echo "Deployment activation attempt $attempt failed."
-            sleep $((attempt * 3))
+
+            sleep $((attempt * 5))
           done
 
-          echo "$DEPLOY_RESPONSE" | jq -e '.success == true' >/dev/null
-          echo "Activated Worker version $VERSION_ID at 100 percent."
+          echo "Failed to activate exact uploaded Worker version."
+          exit "$DEPLOY_STATUS"
 
       - name: Prove exact production release SHA
         shell: bash
