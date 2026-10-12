@@ -153,9 +153,13 @@ jobs:
           NODE
 
           set +e
-          npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
+          timeout --signal=TERM --kill-after=15s 120s npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
           WRANGLER_STATUS=${PIPESTATUS[0]}
           set -e
+
+          if [ "$WRANGLER_STATUS" -eq 124 ] || [ "$WRANGLER_STATUS" -eq 137 ]; then
+            echo "Wrangler publish exceeded the hard timeout; switching to Cloudflare API fallback."
+          fi
 
           if [ "$WRANGLER_STATUS" -ne 0 ]; then
             echo "Wrangler returned non-zero; checking for a successfully-created Worker version."
