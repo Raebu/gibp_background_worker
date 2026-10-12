@@ -3,6 +3,7 @@ import { id, nowIso } from "./db"
 import { readIntentToken } from "./security"
 import { requestMeetingBooking } from "./lifecycle"
 import { readMeetingToken, scheduleNativeGoogleMeeting } from "./google"
+import { operationsSnapshot } from "./operations"
 
 function esc(value: unknown) {
   return String(value ?? "")
@@ -410,6 +411,19 @@ export async function renderDashboard(env: Env) {
   const searchDemand = await env.GROWTH_DB.prepare(
     "SELECT query,landing_path,clicks,impressions,average_position FROM search_demand ORDER BY clicks DESC,impressions DESC LIMIT 10",
   ).all<any>()
+  const operations = await operationsSnapshot(env)
+  const alerts = await env.GROWTH_DB.prepare(
+    "SELECT severity,kind,detail_json,occurrences,last_seen_at FROM operations_alerts WHERE status='open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 8",
+  ).all<any>()
+  const deadLetters = await env.GROWTH_DB.prepare(
+    "SELECT job_kind,error,attempts,created_at FROM dead_letters WHERE status='dead' ORDER BY created_at DESC LIMIT 8",
+  ).all<any>()
+  const attribution = await env.GROWTH_DB.prepare(
+    `SELECT ca.stage,ca.source,ca.value,ca.currency,ca.occurred_at,a.name AS account_name
+     FROM conversion_attribution ca
+     LEFT JOIN accounts a ON a.id=ca.account_id
+     ORDER BY ca.occurred_at DESC LIMIT 12`,
+  ).all<any>()
 
   const cards = Object.entries(metrics || {}).map(([k,v]) =>
     `<div class="card"><div class="tag">${esc(k.replaceAll("_"," "))}</div><div class="score" style="font-size:46px">${esc(v)}</div></div>`
@@ -419,13 +433,40 @@ export async function renderDashboard(env: Env) {
     "GIBP Autonomous Market Development Desk",
     `<div class="top"><div class="brand">GIBP</div><div><span class="tag">Autonomous Market Development Desk</span> · <a href="/dashboard/logout">Sign out</a></div></div>
      <section class="hero"><div class="tag">Production commercial brain</div><h1>Only the work that matters.</h1><p>Discovery, research, qualification, nurture, procurement, website intent and learning feed one operating view.</p></section>
+     <section class="card">
+       <div class="tag">Live operations control</div>
+       <h2>Outbound ${operations.pause.paused ? "PAUSED" : "LIVE"}</h2>
+       <p>${operations.pause.paused ? `Reason: ${esc(operations.pause.reason || "operations hold")}` : "Outbound is allowed only when every compliance, reputation, QEV, working-time and ramp gate passes."}</p>
+       <div class="grid">
+         <div><strong>Open alerts</strong><div class="score" style="font-size:34px">${esc(operations.open_alerts || 0)}</div></div>
+         <div><strong>Critical alerts</strong><div class="score" style="font-size:34px">${esc(operations.critical_alerts || 0)}</div></div>
+         <div><strong>Dead letters</strong><div class="score" style="font-size:34px">${esc(operations.dead_letters || 0)}</div></div>
+         <div><strong>Ambiguous dispatches</strong><div class="score" style="font-size:34px">${esc(operations.ambiguous_dispatches || 0)}</div></div>
+       </div>
+       <form method="post" action="/dashboard/outbound-control">
+         <label for="reason">Reason / operator note</label>
+         <input id="reason" name="reason" placeholder="Optional operator note">
+         <div class="actions" style="margin-top:12px">
+           ${operations.pause.paused
+             ? '<button type="submit" name="action" value="resume">Resume outbound</button>'
+             : '<button type="submit" name="action" value="pause">Emergency pause outbound</button>'}
+         </div>
+       </form>
+       <p class="muted">Pause affects outbound only. Inbound replies, unsubscribe/suppression processing, discovery, research, verification and reporting continue.</p>
+     </section>
      <div class="grid">${cards}</div>
      <section class="card"><h2>Serious opportunities</h2><table><thead><tr><th>Account</th><th>Contact</th><th>Priority</th><th>Reason</th></tr></thead><tbody>
      ${(handoffs.results||[]).map((x:any)=>`<tr><td>${esc(x.account_name)}</td><td>${esc(x.contact_name)}<br><span class="muted">${esc(x.role)}</span></td><td>${esc(x.priority)}</td><td>${esc(x.reason)}</td></tr>`).join("") || '<tr><td colspan="4">No serious handoffs yet.</td></tr>'}
      </tbody></table></section>
      <div class="grid"><section class="card"><h2>Latest conversion signals</h2>${(conversions.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.account_name || "Unattributed visitor")}</strong><div>${esc(x.kind)} · score ${esc(x.score)}</div><div class="muted">${esc(x.created_at)}</div></div>`).join("") || "<p>No conversion requests yet.</p>"}</section>
      <section class="card"><h2>What the system is learning</h2>${(learnings.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.dimension)}: ${esc(x.dimension_value)}</strong><div>weight ${esc(x.weight)} · sample ${esc(x.sample_size)} · serious ${esc(x.serious_count)} · won ${esc(x.won_count)}</div></div>`).join("") || "<p>Learning activates after enough real commercial outcomes exist.</p>"}</section></div>
-     <section class="card"><h2>Non-email demand</h2>${(searchDemand.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.query)}</strong><div>${esc(x.clicks)} clicks · ${esc(x.impressions)} impressions · avg position ${esc(x.average_position ?? "—")}</div><div class="muted">${esc(x.landing_path || "")}</div></div>`).join("") || "<p>No search-demand data has been ingested yet.</p>"}</section>`,
+     <section class="card"><h2>Non-email demand</h2>${(searchDemand.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.query)}</strong><div>${esc(x.clicks)} clicks · ${esc(x.impressions)} impressions · avg position ${esc(x.average_position ?? "—")}</div><div class="muted">${esc(x.landing_path || "")}</div></div>`).join("") || "<p>No search-demand data has been ingested yet.</p>"}</section>
+     <div class="grid">
+       <section class="card"><h2>Operations alerts</h2>${(alerts.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.severity)} · ${esc(x.kind)}</strong><div class="muted">${esc(x.last_seen_at)} · ${esc(x.occurrences)} occurrence(s)</div><div>${esc(x.detail_json)}</div></div>`).join("") || "<p>No open operations alerts.</p>"}</section>
+       <section class="card"><h2>Dead letters</h2>${(deadLetters.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.job_kind)} · attempt ${esc(x.attempts)}</strong><div class="muted">${esc(x.created_at)}</div><div>${esc(x.error)}</div></div>`).join("") || "<p>No terminal queue failures.</p>"}</section>
+     </div>
+     <section class="card"><h2>Conversion attribution</h2>${(attribution.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.account_name || "Unattributed")} · ${esc(x.stage)}</strong><div>${esc(x.source)}${x.value != null ? ` · ${esc(x.value)} ${esc(x.currency || "")}` : ""}</div><div class="muted">${esc(x.occurred_at)}</div></div>`).join("") || "<p>No attributed commercial stages yet.</p>"}</section>
+     <section class="card"><h2>Deliverability</h2>${(operations.deliverability||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.check_kind)} · ${esc(x.status)}</strong><div class="muted">${esc(x.checked_at)}</div></div>`).join("") || "<p>Deliverability checks will appear after the next maintenance cycle.</p>"}</section>`,
     { noindex:true },
   )
 }
