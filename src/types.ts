@@ -64,6 +64,7 @@ export interface Env {
   GSC_GOOGLE_CLIENT_SECRET?: string
   GSC_GOOGLE_REFRESH_TOKEN?: string
   GSC_SITE_URL?: string
+  GSC_SITE_URLS?: string
   GSC_SYNC_DAYS?: string
 
   CALENDAR_GOOGLE_CLIENT_ID?: string
