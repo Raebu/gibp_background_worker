@@ -74,7 +74,8 @@
     "CRM_PROVIDER": "none",
     "BUSINESS_POSTAL_ADDRESS": "82a James Carter Road, Bury St. Edmunds, IP28 7DE, United Kingdom",
     "HANDOFF_TO": "martin@theraeburngroup.com",
-    "GIBP_APPROVED_FACTS": "GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money. GIBP presents responsible providers and applicable terms before any live regulated service. Public information is available at https://www.gibp.global."
+    "GIBP_APPROVED_FACTS": "GIBP is a provider-neutral financial intent, policy, liquidity and execution layer designed for institutional value movement across banks, payment rails and digital money. GIBP presents responsible providers and applicable terms before any live regulated service. Public information is available at https://www.gibp.global.",
+    "GSC_SITE_URLS": "sc-domain:gibp.global,sc-domain:gibp.app"
   },
   "routes": [
     {
