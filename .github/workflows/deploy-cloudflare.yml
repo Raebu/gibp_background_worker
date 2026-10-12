@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: cloudflare-production
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -163,6 +163,7 @@ jobs:
             VERSIONS_JSON=""
             for attempt in 1 2 3 4 5; do
               if VERSIONS_JSON="$(curl --fail --silent --show-error \
+                --connect-timeout 10 --max-time 30 \
                 --retry 2 --retry-delay 2 --retry-all-errors \
                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
                 "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/versions?per_page=20")"; then
@@ -197,6 +198,7 @@ jobs:
             DEPLOY_RESPONSE=""
             for attempt in 1 2 3 4 5; do
               if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
+                --connect-timeout 10 --max-time 30 \
                 --retry 2 --retry-delay 2 --retry-all-errors \
                 -X POST \
                 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
