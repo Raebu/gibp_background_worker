@@ -10,6 +10,8 @@ import {
   renderInsight,
   renderInsightsIndex,
   renderPrivateBriefing,
+  renderMeetingBooking,
+  handleMeetingBookingSelection,
 } from "./experience"
 import { recordCommercialOutcome } from "./learning"
 
@@ -279,6 +281,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "nurture" },
       { kind: "outreach" },
       { kind: "authority" },
+      { kind: "search_demand" },
       { kind: "learning" },
       { kind: "maintenance" },
     ]
@@ -396,6 +399,20 @@ export default {
 
     if (url.pathname === "/briefing/request" && request.method === "POST") {
       return handleConversionRequest(request, env)
+    }
+
+    const meetingMatch = url.pathname.match(/^\/meeting\/([^/]+)$/)
+    if (meetingMatch && request.method === "GET") {
+      return renderMeetingBooking(request, env, decodeURIComponent(meetingMatch[1]))
+    }
+
+    const meetingSelectMatch = url.pathname.match(/^\/meeting\/([^/]+)\/select$/)
+    if (meetingSelectMatch && request.method === "POST") {
+      return handleMeetingBookingSelection(
+        request,
+        env,
+        decodeURIComponent(meetingSelectMatch[1]),
+      )
     }
 
     if (url.pathname === "/insights" && request.method === "GET") {

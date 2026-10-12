@@ -24,6 +24,7 @@ import {
   workingTimeDecision,
 } from "./lifecycle"
 import { generateAuthorityBriefings, recomputeCommercialLearnings } from "./learning"
+import { syncGoogleSearchDemand } from "./google"
 
 function addHours(hours: number) {
   return new Date(Date.now() + hours * 3600_000).toISOString()
@@ -1201,7 +1202,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "learning" | "maintenance",
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "search_demand" | "learning" | "maintenance",
 ) {
   const started = nowIso()
   let result: Record<string, unknown>
@@ -1258,6 +1259,8 @@ export async function runQueueJob(
     result = { sent: await processDueConversations(env) }
   } else if (kind === "authority") {
     result = await generateAuthorityBriefings(env)
+  } else if (kind === "search_demand") {
+    result = await syncGoogleSearchDemand(env)
   } else if (kind === "learning") {
     result = await recomputeCommercialLearnings(env)
   } else {
@@ -1297,6 +1300,7 @@ export async function runTick(env: Env) {
   summary.nurture = await runQueueJob(env, "nurture")
   summary.outreach = await runQueueJob(env, "outreach")
   summary.authority = await runQueueJob(env, "authority")
+  summary.search_demand = await runQueueJob(env, "search_demand")
   summary.learning = await runQueueJob(env, "learning")
   summary.maintenance = await runQueueJob(env, "maintenance")
 

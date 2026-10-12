@@ -49,6 +49,18 @@ export interface Env {
   MEETING_BOOKING_WEBHOOK_URL?: string
   MEETING_BOOKING_SECRET?: string
   BOOKING_URL?: string
+
+  GSC_GOOGLE_CLIENT_ID?: string
+  GSC_GOOGLE_CLIENT_SECRET?: string
+  GSC_GOOGLE_REFRESH_TOKEN?: string
+  GSC_SITE_URL?: string
+  GSC_SYNC_DAYS?: string
+
+  CALENDAR_GOOGLE_CLIENT_ID?: string
+  CALENDAR_GOOGLE_CLIENT_SECRET?: string
+  CALENDAR_GOOGLE_REFRESH_TOKEN?: string
+  GOOGLE_CALENDAR_ID?: string
+  GOOGLE_CALENDAR_TIMEZONE?: string
 }
 
 export interface Account {
@@ -77,7 +89,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "learning" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "authority" | "search_demand" | "learning" | "maintenance"
 }
 
 export interface Contact {
