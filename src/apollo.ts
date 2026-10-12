@@ -441,6 +441,8 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
              role=?,
              verified=MAX(verified,1),
              seniority_score=MAX(seniority_score,?),
+             identity_verified_at=?,
+             role_verified_at=?,
              updated_at=?
          WHERE id=?`,
       ).bind(
@@ -449,15 +451,18 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
         title,
         titleScore,
         now,
+        now,
+        now,
         contactId,
       ).run()
     } else {
       await env.GROWTH_DB.prepare(
         `INSERT INTO contacts
           (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
-           seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+           seniority_score,consent_status,lawful_basis,status,created_at,updated_at,
+           identity_verified_at,role_verified_at)
          VALUES (?,?,?,?,?,'apollo_verified',NULL,?,0,1,?,'unknown',
-           'third_party_professional_data_review_required','research_only',?,?)`,
+           'third_party_professional_data_review_required','research_only',?,?,?,?)`,
       ).bind(
         contactId,
         candidate.account_id,
@@ -466,6 +471,8 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
         email,
         candidate.country_code,
         titleScore,
+        now,
+        now,
         now,
         now,
       ).run()

@@ -26,6 +26,7 @@ export async function sendResend(
 ) {
   const dryRun = (env.SEND_MODE || "dry_run") !== "live"
   let text = input.text.trim()
+  let unsubscribeUrl: string | null = null
 
   if (input.includeComplianceFooter !== false) {
     const token = env.UNSUBSCRIBE_SECRET
@@ -37,6 +38,7 @@ export async function sendResend(
     if (!token) throw new Error("UNSUBSCRIBE_SECRET is required for live sending")
 
     const unsubscribe = `${env.PUBLIC_BASE_URL || "https://growth.gibp.global"}/unsubscribe?token=${encodeURIComponent(token)}`
+    unsubscribeUrl = unsubscribe
     const postalAddress =
       env.BUSINESS_POSTAL_ADDRESS ||
       (dryRun ? "[postal address required before live sending]" : "")
@@ -71,7 +73,15 @@ export async function sendResend(
       text,
       html: `<div style="font-family:Arial,sans-serif;line-height:1.55;white-space:pre-wrap">${escapeHtml(text)}</div>`,
       reply_to: input.replyTo,
-      headers: input.headers,
+      headers: {
+        ...(input.headers || {}),
+        ...(unsubscribeUrl
+          ? {
+              "List-Unsubscribe": `<${unsubscribeUrl}>`,
+              "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+            }
+          : {}),
+      },
       tags: [
         { name: "system", value: "gibp-growth" },
         ...(input.conversationId

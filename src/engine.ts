@@ -1,4 +1,4 @@
-import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
+import type { Account, Contact, Conversation, Env, GrowthJob, ReplyClassification } from "./types"
 import { discoverApolloContactCandidates, enrichTopApolloCandidate, runApolloEnrichmentCommissioningTest, runApolloEnrichmentCommissioningV2 } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
@@ -21,10 +21,26 @@ import {
   prepareNurture,
   refreshNurtureSchedules,
   requestMeetingBooking,
-  workingTimeDecision,
 } from "./lifecycle"
 import { generateAuthorityBriefings, recomputeCommercialLearnings } from "./learning"
 import { syncGoogleSearchDemand } from "./google"
+import {
+  heartbeatHealth,
+  recordJobFailed,
+  recordJobStarted,
+  recordJobSucceeded,
+  refreshContactQualityBatch,
+  sendingTimeDecision,
+  storeDailyFunnelSnapshot,
+  syncPublicHolidays,
+} from "./assurance"
+import { syncCrm } from "./crm"
+import {
+  applyInitialExperimentCopy,
+  assignInitialExperiment,
+  evaluateExperiments,
+  recordExperimentEvent,
+} from "./experiments"
 import {
   claimOutboundDispatch,
   claimWebhookEvent,
@@ -37,6 +53,8 @@ import {
   operationsSnapshot,
   outboundPauseState,
   recordConversionAttribution,
+  recordOperationsAlert,
+  resolveOperationsAlert,
   runDeliverabilityChecks,
 } from "./operations"
 
@@ -148,6 +166,8 @@ async function processContactDiscovery(env: Env) {
              AND ct.status='active'
              AND ct.name IS NOT NULL
              AND length(trim(ct.name)) > 0
+             AND COALESCE(ct.identity_verified_at,ct.updated_at) >= datetime('now','-90 day')
+             AND COALESCE(ct.role_verified_at,ct.updated_at) >= datetime('now','-90 day')
          )
          AND NOT EXISTS (
            SELECT 1
@@ -373,6 +393,14 @@ Contact role/address: ${contact.role || ""} / ${contact.email}`
     }
   }
 
+  let experiment: any = null
+  if (step === 1 && (env.SEND_MODE || "dry_run") === "live") {
+    const assignment = await assignInitialExperiment(env, account, contact, conversation)
+    const tested = applyInitialExperimentCopy(copy, account, assignment)
+    copy = { subject: tested.subject, text: tested.text }
+    experiment = tested.experiment || null
+  }
+
   const intentToken = await makeIntentToken(conversation.id, account.id, env)
   const briefingUrl = new URL("/briefing", env.PUBLIC_BASE_URL || "https://growth.gibp.global")
   briefingUrl.searchParams.set("gi", intentToken)
@@ -382,6 +410,7 @@ Contact role/address: ${contact.role || ""} / ${contact.email}`
   return {
     subject: copy.subject,
     text: `${copy.text.trim()}\n\nPrivate briefing prepared for ${account.name}: ${briefingUrl.toString()}\nPublic GIBP overview: ${publicOverview.toString()}`,
+    experiment,
   }
 }
 
@@ -428,7 +457,7 @@ async function processDueConversations(env: Env) {
     const contact = await contactFor(env, conversation.contact_id)
     if (!account || !contact) continue
 
-    const timing = workingTimeDecision(contact, account)
+    const timing = await sendingTimeDecision(env, contact, account)
     if (!timing.allowed) {
       await env.GROWTH_DB.prepare(
         "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
@@ -578,7 +607,7 @@ async function processDueConversations(env: Env) {
           copy.subject,
           result.text,
           classification,
-          { dry_run: true, step },
+          { dry_run: true, step, experiment: copy.experiment || null },
         )
         await env.GROWTH_DB.prepare(
           "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
@@ -604,7 +633,7 @@ async function processDueConversations(env: Env) {
         copy.subject,
         result.text,
         classification,
-        { dry_run: false, idempotency_key: idempotencyKey },
+        { dry_run: false, idempotency_key: idempotencyKey, experiment: copy.experiment || null },
       )
 
       const next = step === 1 ? daysFromNow(4) : step === 2 ? daysFromNow(7) : daysFromNow(30)
@@ -1041,6 +1070,31 @@ export async function handleInboundEmail(env: Env, emailId: string) {
   const body = received.text || received.html?.replace(/<[^>]+>/g, " ") || ""
   const classification = await classifyReply(env, received.subject || "", body)
 
+  const positiveIntents = new Set([
+    "positive",
+    "information_request",
+    "meeting_request",
+    "referral",
+    "commercial_terms",
+    "security_or_legal",
+  ])
+  if (positiveIntents.has(classification.intent)) {
+    await recordExperimentEvent(
+      env,
+      conversation.id,
+      "positive_reply",
+      `inbound:${emailId}:positive_reply`,
+    )
+  }
+  if (classification.intent === "meeting_request") {
+    await recordExperimentEvent(
+      env,
+      conversation.id,
+      "meeting_requested",
+      `inbound:${emailId}:meeting_requested`,
+    )
+  }
+
   await env.GROWTH_DB.prepare(
     `INSERT INTO messages
       (id,conversation_id,direction,provider_id,message_id,subject,text,classification,metadata_json,created_at)
@@ -1102,6 +1156,12 @@ export async function handleInboundEmail(env: Env, emailId: string) {
     (qualification.completeness >= 70 && newScore >= 60)
   ) {
     await createHandoff(env, conversation, classification)
+    await recordExperimentEvent(
+      env,
+      conversation.id,
+      "qualified_opportunity",
+      `handoff:${conversation.id}`,
+    )
     return { matched: true, classification, handoff: true }
   }
 
@@ -1431,6 +1491,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
            seniority_score=MAX(seniority_score,?),
            consent_status=CASE WHEN ?!='unknown' THEN ? ELSE consent_status END,
            lawful_basis=COALESCE(?,lawful_basis),
+           identity_verified_at=CASE WHEN ? IS NOT NULL THEN ? ELSE identity_verified_at END,
+           role_verified_at=CASE WHEN ? IS NOT NULL THEN ? ELSE role_verified_at END,
            updated_at=?
        WHERE id=?`,
     ).bind(
@@ -1445,6 +1507,10 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
       item.consent_status || "unknown",
       item.consent_status || "unknown",
       item.lawful_basis || null,
+      item.name || null,
+      now,
+      item.role || null,
+      now,
       now,
       existing.id,
     ).run()
@@ -1454,8 +1520,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
   await env.GROWTH_DB.prepare(
     `INSERT INTO contacts
       (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
-       consent_status,lawful_basis,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)`,
+       consent_status,lawful_basis,status,created_at,updated_at,identity_verified_at,role_verified_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)`,
   ).bind(
     item.id || id(),
     accountId,
@@ -1472,6 +1538,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
     item.lawful_basis || null,
     now,
     now,
+    item.name ? now : null,
+    item.role ? now : null,
   ).run()
 }
 
@@ -1491,10 +1559,11 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "outreach_simulation_commissioning" | "authority" | "search_demand" | "learning" | "maintenance",
+  kind: GrowthJob["kind"],
 ) {
-  const started = nowIso()
-  let result: Record<string, unknown>
+  const started = await recordJobStarted(env, kind)
+  try {
+    let result: Record<string, unknown>
 
   if (kind === "directories") {
     result = { directories: await discoverOfficialBankDirectories(env) }
@@ -1554,11 +1623,55 @@ export async function runQueueJob(
     result = await syncGoogleSearchDemand(env)
   } else if (kind === "learning") {
     result = await recomputeCommercialLearnings(env)
+  } else if (kind === "crm_sync") {
+    result = await syncCrm(env)
   } else {
     const reputation = await evaluateReputationAndSafety(env)
     const ramp = await maybeAdjustRamp(env)
     const report = await maybeSendDailyCommercialReport(env)
-    const resultBase: Record<string, unknown> = { reputation, ramp, report }
+    const quality = await refreshContactQualityBatch(env)
+    const experiments = await evaluateExperiments(env)
+    const funnel = await storeDailyFunnelSnapshot(env)
+    const heartbeat = await heartbeatHealth(env)
+    const resultBase: Record<string, unknown> = {
+      reputation,
+      ramp,
+      report,
+      quality,
+      experiments,
+      funnel,
+      heartbeat,
+    }
+
+    if (heartbeat.stale.length || heartbeat.failing.length) {
+      await recordOperationsAlert(env, {
+        fingerprint: "job-heartbeat-sla",
+        severity: heartbeat.failing.length ? "critical" : "warning",
+        kind: "job_heartbeat_sla",
+        detail: {
+          stale: heartbeat.stale.map((x: any) => x.job_kind),
+          failing: heartbeat.failing.map((x: any) => x.job_kind),
+        },
+      })
+    } else {
+      await resolveOperationsAlert(env, "job-heartbeat-sla")
+    }
+
+    const lastHolidaySync = await getSetting(env, "last_holiday_sync_at")
+    if (!lastHolidaySync || Date.now() - new Date(lastHolidaySync).getTime() > 24 * 3600_000) {
+      const holidays = await syncPublicHolidays(env)
+      resultBase.holidays = holidays
+      if (holidays.failures.length) {
+        await recordOperationsAlert(env, {
+          fingerprint: "holiday-calendar-sync",
+          severity: "warning",
+          kind: "holiday_calendar_sync_degraded",
+          detail: holidays.failures,
+        })
+      } else {
+        await resolveOperationsAlert(env, "holiday-calendar-sync")
+      }
+    }
 
     const lastDeliverability = await getSetting(env, "last_deliverability_check_at")
     if (!lastDeliverability || Date.now() - new Date(lastDeliverability).getTime() > 6 * 3600_000) {
@@ -1574,12 +1687,17 @@ export async function runQueueJob(
     }
   }
 
-  await audit(env, "engine", "queue_job_complete", "job", kind, {
-    started,
-    finished: nowIso(),
-    result,
-  })
-  return result
+    await audit(env, "engine", "queue_job_complete", "job", kind, {
+      started,
+      finished: nowIso(),
+      result,
+    })
+    await recordJobSucceeded(env, kind, started, result)
+    return result
+  } catch (error) {
+    await recordJobFailed(env, kind, started, error)
+    throw error
+  }
 }
 
 export async function runTick(env: Env) {
@@ -1601,6 +1719,7 @@ export async function runTick(env: Env) {
   summary.authority = await runQueueJob(env, "authority")
   summary.search_demand = await runQueueJob(env, "search_demand")
   summary.learning = await runQueueJob(env, "learning")
+  summary.crm_sync = await runQueueJob(env, "crm_sync")
   summary.maintenance = await runQueueJob(env, "maintenance")
 
   await setSetting(env, "last_tick_at", nowIso())
