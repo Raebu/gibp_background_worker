@@ -127,36 +127,71 @@ jobs:
           set -euo pipefail
           test -n "$VERSION_ID"
 
+          : > /tmp/version-deploy.log
+          set +e
+          timeout --signal=TERM --kill-after=15s 120s \
+            npx wrangler versions deploy "$VERSION_ID@100%" -y \
+              --message "Exact GitHub rescue release $GITHUB_SHA" \
+              2>&1 | tee /tmp/version-deploy.log
+          DEPLOY_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$DEPLOY_STATUS" -eq 0 ]; then
+            echo "Wrangler activated Worker version $VERSION_ID at 100 percent."
+            exit 0
+          fi
+
+          echo "Wrangler version activation returned status $DEPLOY_STATUS."
+
+          # A transient parser/control-plane failure may occur after Cloudflare
+          # has already activated the version. Prove that before retrying.
+          if curl --fail --silent --show-error \
+            --connect-timeout 8 --max-time 20 \
+            "https://growth.gibp.global/health" | tee /tmp/post-wrangler-health.json \
+            && grep -q '"ok":true' /tmp/post-wrangler-health.json \
+            && grep -q '"mode":"live"' /tmp/post-wrangler-health.json \
+            && grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/post-wrangler-health.json; then
+            echo "Production already serves the exact GitHub SHA despite Wrangler's non-zero exit."
+            exit 0
+          fi
+
+          echo "Production has not moved yet; using Cloudflare deployment API force fallback."
           DEPLOY_BODY="$(jq -cn \
             --arg version "$VERSION_ID" \
-            --arg sha "$GITHUB_SHA" \
             '{
               strategy:"percentage",
-              versions:[{version_id:$version,percentage:100}],
-              annotations:{
-                "workers/message":("Exact GitHub rescue release " + $sha),
-                "workers/triggered_by":"github-actions-versioned-rescue"
-              }
+              versions:[{version_id:$version,percentage:100}]
             }')"
 
-          DEPLOY_RESPONSE=""
           for attempt in 1 2 3 4 5; do
-            if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
-              --connect-timeout 10 --max-time 30 \
-              --retry 1 --retry-delay 2 --retry-all-errors \
-              -X POST \
-              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "$DEPLOY_BODY" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"; then
-              break
+            BODY_FILE="/tmp/cloudflare-deploy-${attempt}.json"
+            HTTP_CODE="$(
+              curl --silent --show-error \
+                --connect-timeout 10 --max-time 30 \
+                -o "$BODY_FILE" \
+                -w '%{http_code}' \
+                -X POST \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$DEPLOY_BODY" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments?force=true" \
+                || true
+            )"
+
+            echo "Cloudflare activation attempt $attempt returned HTTP ${HTTP_CODE:-000}."
+            cat "$BODY_FILE" || true
+
+            if [ "$HTTP_CODE" = "200" ] \
+              && jq -e '.success == true' "$BODY_FILE" >/dev/null 2>&1; then
+              echo "Cloudflare force fallback activated Worker version $VERSION_ID."
+              exit 0
             fi
-            echo "Deployment activation attempt $attempt failed."
+
             sleep $((attempt * 3))
           done
 
-          echo "$DEPLOY_RESPONSE" | jq -e '.success == true' >/dev/null
-          echo "Activated Worker version $VERSION_ID at 100 percent."
+          echo "Unable to activate uploaded Worker version."
+          exit 1
 
       - name: Prove exact production release SHA
         shell: bash
