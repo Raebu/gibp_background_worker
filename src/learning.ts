@@ -2,6 +2,7 @@ import type { Env } from "./types"
 import { aiJson } from "./ai"
 import { audit, id, nowIso } from "./db"
 import { recordConversionAttribution } from "./operations"
+import { recordExperimentEvent } from "./experiments"
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
@@ -61,6 +62,22 @@ export async function recordCommercialOutcome(env: Env, body: any) {
     metadata: { reason: body.reason || null },
     occurredAt,
   })
+
+  if (conversationId) {
+    const eventType =
+      outcome === "partner_agreed" ? "won" :
+      outcome === "meeting_booked" ? "meeting_booked" :
+      outcome
+    if (["meeting_booked","qualified_opportunity","proposal_requested","proposal_sent","won","lost","deferred"].includes(eventType)) {
+      await recordExperimentEvent(
+        env,
+        conversationId,
+        eventType,
+        `commercial_outcome:${outcomeId}:${eventType}`,
+        body.value == null ? null : Number(body.value),
+      )
+    }
+  }
 
   await audit(env, "learning", "commercial_outcome", "account", accountId, {
     conversation_id: conversationId,
