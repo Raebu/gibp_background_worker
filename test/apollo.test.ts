@@ -60,3 +60,21 @@ describe("Apollo contact persistence", () => {
     expect(source).not.toContain("third_party_professional_data_review_required','research_only',?,?)\n       ON CONFLICT DO UPDATE SET")
   })
 })
+
+
+describe("production Apollo commissioning posture", () => {
+  it("keeps live sending blocked and runs one paid enrichment before QEV", () => {
+    const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
+    const indexSource = fs.readFileSync("src/index.ts", "utf8")
+    const scheduledStart = indexSource.indexOf("async scheduled")
+    const queueStart = indexSource.indexOf("async queue", scheduledStart)
+    const scheduledSource = indexSource.slice(scheduledStart, queueStart)
+
+    expect(config.vars.SEND_MODE).toBe("dry_run")
+    expect(config.vars.APOLLO_ENRICHMENT_DAILY_CAP).toBe("1")
+    expect(scheduledSource).toContain('{ kind: "apollo_enrich" },')
+    expect(scheduledSource.indexOf('{ kind: "apollo_enrich" },')).toBeLessThan(
+      scheduledSource.indexOf('{ kind: "email_verify" },'),
+    )
+  })
+})
