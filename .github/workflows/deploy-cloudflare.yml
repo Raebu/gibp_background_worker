@@ -60,6 +60,27 @@ jobs:
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply GROWTH_DB --remote
 
+      - name: Verify live operations hardening schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          TABLE_COUNT="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT COUNT(*) AS total
+            FROM sqlite_master
+            WHERE type='table'
+              AND name IN (
+                'outbound_dispatches',
+                'webhook_events',
+                'operations_alerts',
+                'dead_letters',
+                'deliverability_checks',
+                'daily_commercial_reports',
+                'conversion_attribution'
+              );
+          " | jq '[.. | objects | .total? | numbers] | max // 0')"
+          test "$TABLE_COUNT" -eq 7
+          echo "Live operations hardening schema verified: $TABLE_COUNT/7 tables."
+
       - name: Preflight controlled live ramp
         shell: bash
         run: |
