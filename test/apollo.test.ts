@@ -62,8 +62,8 @@ describe("Apollo contact persistence", () => {
 })
 
 
-describe("production Apollo commissioning posture", () => {
-  it("keeps live sending blocked and runs one paid enrichment before QEV", () => {
+describe("production Apollo safety posture", () => {
+  it("keeps live sending blocked and paid enrichment disabled", () => {
     const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
     const indexSource = fs.readFileSync("src/index.ts", "utf8")
     const scheduledStart = indexSource.indexOf("async scheduled")
@@ -71,11 +71,8 @@ describe("production Apollo commissioning posture", () => {
     const scheduledSource = indexSource.slice(scheduledStart, queueStart)
 
     expect(config.vars.SEND_MODE).toBe("dry_run")
-    expect(config.vars.APOLLO_ENRICHMENT_DAILY_CAP).toBe("1")
-    expect(scheduledSource).toContain('{ kind: "apollo_enrich" },')
-    expect(scheduledSource.indexOf('{ kind: "apollo_enrich" },')).toBeLessThan(
-      scheduledSource.indexOf('{ kind: "email_verify" },'),
-    )
+    expect(config.vars.APOLLO_ENRICHMENT_DAILY_CAP).toBe("0")
+    expect(scheduledSource).not.toContain('{ kind: "apollo_enrich" },')
   })
 })
 

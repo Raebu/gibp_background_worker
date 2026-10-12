@@ -205,7 +205,7 @@ jobs:
           jq -e '(.success == true or .success == "true") and (.safe_to_send == true or .safe_to_send == "true")' /tmp/qev-sandbox.json >/dev/null
           echo "QuickEmailVerification sandbox verification passed without consuming a production verification."
 
-      - name: Confirm Apollo enrichment is one-per-day, dry-run and bounded
+      - name: Confirm Apollo enrichment remains disabled in dry-run
         shell: bash
         run: |
           set -euo pipefail
@@ -215,8 +215,8 @@ jobs:
           if (config.vars.SEND_MODE !== "dry_run") {
             throw new Error("Persistent Apollo commissioning requires SEND_MODE=dry_run")
           }
-          if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "1") {
-            throw new Error("APOLLO_ENRICHMENT_DAILY_CAP must be exactly 1 during persistent commissioning")
+          if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") {
+            throw new Error("APOLLO_ENRICHMENT_DAILY_CAP must remain exactly 0")
           }
           NODE
           ! grep -R "reveal_phone_number: true" src
@@ -461,7 +461,9 @@ jobs:
           echo "Timed out waiting for Apollo candidate discovery."
           exit 1
 
-      - name: Commission one-time Apollo two-person enrichment test
+      # Paid Apollo enrichment is intentionally disabled until explicitly commissioned.
+      - name: Commission one-time Apollo two-person enrichment test (disabled)
+        if: ${{ false }}
         shell: bash
         run: |
           set -euo pipefail
@@ -527,7 +529,8 @@ jobs:
           echo "Timed out waiting for Apollo enrichment commissioning test."
           exit 1
 
-      - name: Commission one additional Apollo credit on a different account
+      - name: Commission one additional Apollo credit on a different account (disabled)
+        if: ${{ false }}
         shell: bash
         run: |
           set -euo pipefail
