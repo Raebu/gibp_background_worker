@@ -25,6 +25,20 @@ import {
 } from "./lifecycle"
 import { generateAuthorityBriefings, recomputeCommercialLearnings } from "./learning"
 import { syncGoogleSearchDemand } from "./google"
+import {
+  claimOutboundDispatch,
+  claimWebhookEvent,
+  evaluateReputationAndSafety,
+  markOutboundDispatchFailed,
+  markOutboundDispatchSent,
+  markWebhookFailed,
+  markWebhookProcessed,
+  maybeSendDailyCommercialReport,
+  operationsSnapshot,
+  outboundPauseState,
+  recordConversionAttribution,
+  runDeliverabilityChecks,
+} from "./operations"
 
 function addHours(hours: number) {
   return new Date(Date.now() + hours * 3600_000).toISOString()
@@ -423,6 +437,19 @@ async function processDueConversations(env: Env) {
     }
 
     if (conversation.state === "nurture") {
+      const decision = await canSendTo(env, account, contact, false)
+      if (!decision.allowed) {
+        await audit(env, "compliance", "send_blocked", "conversation", conversation.id, {
+          reason: decision.reason,
+          classification: "nurture",
+        })
+        const retry = /cap|paused/.test(decision.reason) ? addHours(24) : daysFromNow(30)
+        await env.GROWTH_DB.prepare(
+          "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
+        ).bind(retry, nowIso(), conversation.id).run()
+        continue
+      }
+
       const nurture = await prepareNurture(env, conversation, contact)
       if (!nurture.due || !nurture.signal) {
         await env.GROWTH_DB.prepare(
@@ -431,34 +458,64 @@ async function processDueConversations(env: Env) {
         continue
       }
 
-      const copy = await makeNurtureOutreach(env, account, contact, nurture.signal)
-      const result = await sendResend(env, {
-        to: contact.email,
-        subject: copy.subject,
-        text: copy.text,
-        conversationId: conversation.id,
-        classification: "nurture",
-      })
+      const classification = "nurture"
+      const idempotencyKey = `gibp:${conversation.id}:nurture:${conversation.nurture_count + 1}`
+      const live = (env.SEND_MODE || "dry_run") === "live"
+      const dispatch = live
+        ? await claimOutboundDispatch(env, conversation.id, classification, idempotencyKey)
+        : { claimed: true, claim_token: "", idempotency_key: idempotencyKey }
 
-      if (result.dry_run) {
-        await recordSimulation(env, conversation.id, copy.subject, result.text, "nurture", {
-          dry_run: true,
-          signal: nurture.signal,
+      if (!dispatch.claimed) {
+        await audit(env, "operations", "duplicate_dispatch_blocked", "conversation", conversation.id, {
+          classification,
+          idempotency_key: idempotencyKey,
         })
-        await env.GROWTH_DB.prepare(
-          "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
-        ).bind(daysFromNow(7), nowIso(), conversation.id).run()
-      } else {
-        await recordOutbound(
-          env, conversation.id, result.id, result.message_id, copy.subject, result.text, "nurture",
-          { dry_run: false, signal: nurture.signal },
-        )
-        await markNurtureSent(env, conversation.id, nurture.signal.observed_at || null)
-        await env.GROWTH_DB.prepare(
-          "UPDATE contacts SET last_contact_at=?,updated_at=? WHERE id=?",
-        ).bind(nowIso(), nowIso(), contact.id).run()
+        continue
       }
-      sent += 1
+
+      const copy = await makeNurtureOutreach(env, account, contact, nurture.signal)
+      try {
+        const result = await sendResend(env, {
+          to: contact.email,
+          subject: copy.subject,
+          text: copy.text,
+          conversationId: conversation.id,
+          classification,
+          idempotencyKey,
+        })
+
+        if (result.dry_run) {
+          await recordSimulation(env, conversation.id, copy.subject, result.text, classification, {
+            dry_run: true,
+            signal: nurture.signal,
+          })
+          await env.GROWTH_DB.prepare(
+            "UPDATE conversations SET next_action_at=?,updated_at=? WHERE id=?",
+          ).bind(daysFromNow(7), nowIso(), conversation.id).run()
+        } else {
+          await markOutboundDispatchSent(
+            env,
+            idempotencyKey,
+            dispatch.claim_token,
+            result.id,
+            result.message_id,
+          )
+          await recordOutbound(
+            env, conversation.id, result.id, result.message_id, copy.subject, result.text, classification,
+            { dry_run: false, signal: nurture.signal, idempotency_key: idempotencyKey },
+          )
+          await markNurtureSent(env, conversation.id, nurture.signal.observed_at || null)
+          await env.GROWTH_DB.prepare(
+            "UPDATE contacts SET last_contact_at=?,updated_at=? WHERE id=?",
+          ).bind(nowIso(), nowIso(), contact.id).run()
+        }
+        sent += 1
+      } catch (error) {
+        if (live) {
+          await markOutboundDispatchFailed(env, idempotencyKey, dispatch.claim_token, error)
+        }
+        throw error
+      }
       continue
     }
 
@@ -469,7 +526,7 @@ async function processDueConversations(env: Env) {
         reason: decision.reason,
       })
       const retry =
-        /cap/.test(decision.reason) ? addHours(24) : daysFromNow(30)
+        /cap|paused/.test(decision.reason) ? addHours(24) : daysFromNow(30)
       await env.GROWTH_DB.prepare(
         "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
       )
@@ -488,61 +545,90 @@ async function processDueConversations(env: Env) {
     }
 
     const step = conversation.outbound_count + 1
-    const copy = await makeOutreach(env, account, contact, conversation, step)
-    const result = await sendResend(env, {
-      to: contact.email,
-      subject: copy.subject,
-      text: copy.text,
-      conversationId: conversation.id,
-      classification: isInitial ? "initial" : `followup_${step}`,
-    })
     const classification = isInitial ? "initial" : `followup_${step}`
+    const idempotencyKey = `gibp:${conversation.id}:${classification}`
+    const live = (env.SEND_MODE || "dry_run") === "live"
+    const dispatch = live
+      ? await claimOutboundDispatch(env, conversation.id, classification, idempotencyKey)
+      : { claimed: true, claim_token: "", idempotency_key: idempotencyKey }
 
-    if (result.dry_run) {
-      await recordSimulation(
-        env,
-        conversation.id,
-        copy.subject,
-        result.text,
+    if (!dispatch.claimed) {
+      await audit(env, "operations", "duplicate_dispatch_blocked", "conversation", conversation.id, {
         classification,
-        { dry_run: true, step },
-      )
-      await env.GROWTH_DB.prepare(
-        "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
-      )
-        .bind(daysFromNow(1), nowIso(), conversation.id)
-        .run()
-      sent += 1
+        idempotency_key: idempotencyKey,
+      })
       continue
     }
 
-    await recordOutbound(
-      env,
-      conversation.id,
-      result.id,
-      result.message_id,
-      copy.subject,
-      result.text,
-      classification,
-      { dry_run: false },
-    )
+    const copy = await makeOutreach(env, account, contact, conversation, step)
+    try {
+      const result = await sendResend(env, {
+        to: contact.email,
+        subject: copy.subject,
+        text: copy.text,
+        conversationId: conversation.id,
+        classification,
+        idempotencyKey,
+      })
 
-    const next = step === 1 ? daysFromNow(4) : step === 2 ? daysFromNow(7) : daysFromNow(30)
-    await env.GROWTH_DB.prepare(
-      `UPDATE conversations
-       SET outbound_count=outbound_count+1, message_count=message_count+1,
-           state=CASE WHEN ? >= 3 THEN 'nurture' ELSE state END,
-           next_action_at=?, updated_at=?
-       WHERE id=?`,
-    )
-      .bind(step, next, nowIso(), conversation.id)
-      .run()
-    await env.GROWTH_DB.prepare(
-      "UPDATE contacts SET last_contact_at=?, updated_at=? WHERE id=?",
-    )
-      .bind(nowIso(), nowIso(), contact.id)
-      .run()
-    sent += 1
+      if (result.dry_run) {
+        await recordSimulation(
+          env,
+          conversation.id,
+          copy.subject,
+          result.text,
+          classification,
+          { dry_run: true, step },
+        )
+        await env.GROWTH_DB.prepare(
+          "UPDATE conversations SET next_action_at=?, updated_at=? WHERE id=?",
+        )
+          .bind(daysFromNow(1), nowIso(), conversation.id)
+          .run()
+        sent += 1
+        continue
+      }
+
+      await markOutboundDispatchSent(
+        env,
+        idempotencyKey,
+        dispatch.claim_token,
+        result.id,
+        result.message_id,
+      )
+      await recordOutbound(
+        env,
+        conversation.id,
+        result.id,
+        result.message_id,
+        copy.subject,
+        result.text,
+        classification,
+        { dry_run: false, idempotency_key: idempotencyKey },
+      )
+
+      const next = step === 1 ? daysFromNow(4) : step === 2 ? daysFromNow(7) : daysFromNow(30)
+      await env.GROWTH_DB.prepare(
+        `UPDATE conversations
+         SET outbound_count=outbound_count+1, message_count=message_count+1,
+             state=CASE WHEN ? >= 3 THEN 'nurture' ELSE state END,
+             next_action_at=?, updated_at=?
+         WHERE id=?`,
+      )
+        .bind(step, next, nowIso(), conversation.id)
+        .run()
+      await env.GROWTH_DB.prepare(
+        "UPDATE contacts SET last_contact_at=?, updated_at=? WHERE id=?",
+      )
+        .bind(nowIso(), nowIso(), contact.id)
+        .run()
+      sent += 1
+    } catch (error) {
+      if (live) {
+        await markOutboundDispatchFailed(env, idempotencyKey, dispatch.claim_token, error)
+      }
+      throw error
+    }
   }
   return sent
 }
@@ -757,6 +843,19 @@ async function createHandoff(
     .bind(nowIso(), nowIso(), conversation.id)
     .run()
 
+  await recordConversionAttribution(env, {
+    sourceKey: `handoff:${conversation.id}`,
+    conversationId: conversation.id,
+    accountId: account.id,
+    stage: "qualified_opportunity",
+    source: "serious_handoff",
+    metadata: {
+      intent: classification.intent,
+      score: briefing.conversation_score,
+      qualification_completeness: qualification?.completeness ?? null,
+    },
+  })
+
   if (env.HANDOFF_TO) {
     const result = await sendInternalResend(env, {
       to: env.HANDOFF_TO,
@@ -788,6 +887,12 @@ async function autoReply(
   inboundText: string,
   inboundMessageId?: string,
 ) {
+  const pause = await outboundPauseState(env)
+  if (pause.paused) {
+    await audit(env, "operations", "auto_reply_blocked_by_pause", "conversation", conversation.id, pause)
+    return
+  }
+
   const facts = approvedFacts(env)
   const qualification = await getQualificationProfile(env, conversation.id)
   const structuredEvidence = await env.GROWTH_DB.prepare(
@@ -827,16 +932,46 @@ Maximum 170 words.`,
       ? `${generated.text.trim()}\n\nPrivate briefing: ${privateBriefingUrl}`
       : generated.text
 
-  const result = await sendResend(env, {
-    to: contact.email,
-    subject: generated.subject,
-    text: replyText,
-    conversationId: conversation.id,
-    classification: "auto_reply",
-    headers: inboundMessageId
-      ? { "In-Reply-To": inboundMessageId, References: inboundMessageId }
-      : undefined,
-  })
+  const idempotencyKey = `gibp:${conversation.id}:auto_reply:${inboundMessageId || conversation.inbound_count}`
+  const live = (env.SEND_MODE || "dry_run") === "live"
+  const dispatch = live
+    ? await claimOutboundDispatch(env, conversation.id, "auto_reply", idempotencyKey)
+    : { claimed: true, claim_token: "", idempotency_key: idempotencyKey }
+  if (!dispatch.claimed) {
+    await audit(env, "operations", "duplicate_dispatch_blocked", "conversation", conversation.id, {
+      classification: "auto_reply",
+      idempotency_key: idempotencyKey,
+    })
+    return
+  }
+
+  let result
+  try {
+    result = await sendResend(env, {
+      to: contact.email,
+      subject: generated.subject,
+      text: replyText,
+      conversationId: conversation.id,
+      classification: "auto_reply",
+      idempotencyKey,
+      headers: inboundMessageId
+        ? { "In-Reply-To": inboundMessageId, References: inboundMessageId }
+        : undefined,
+    })
+    if (!result.dry_run) {
+      await markOutboundDispatchSent(
+        env,
+        idempotencyKey,
+        dispatch.claim_token,
+        result.id,
+        result.message_id,
+      )
+    }
+  } catch (error) {
+    if (live) await markOutboundDispatchFailed(env, idempotencyKey, dispatch.claim_token, error)
+    throw error
+  }
+
   if (result.dry_run) {
     await recordSimulation(
       env,
@@ -855,7 +990,7 @@ Maximum 170 words.`,
       generated.subject,
       result.text,
       "auto_reply",
-      { dry_run: false },
+      { dry_run: false, idempotency_key: idempotencyKey },
     )
   }
   const replyState = classification.intent === "not_now" ? "nurture" : "engaged"
@@ -1012,7 +1147,7 @@ export async function handleInboundEmail(env: Env, emailId: string) {
   return { matched: true, classification }
 }
 
-export async function handleResendEvent(env: Env, event: any) {
+async function processResendEventCore(env: Env, event: any) {
   const type = String(event?.type || "")
   const data = event?.data || {}
 
@@ -1023,12 +1158,14 @@ export async function handleResendEvent(env: Env, event: any) {
   if (type === "suppression.added") {
     const suppressedEmail = String(data.email || data.recipient || "").trim().toLowerCase()
     if (suppressedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppressedEmail)) {
+      const providerReason = String(data.reason || "suppression.added")
+      const normalizedReason = /complain/i.test(providerReason) ? "email.complained" : providerReason
       await env.GROWTH_DB.prepare(
         "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,?,?)",
       )
         .bind(
           suppressedEmail,
-          String(data.reason || "suppression.added"),
+          normalizedReason,
           "resend_webhook",
           nowIso(),
         )
@@ -1039,8 +1176,12 @@ export async function handleResendEvent(env: Env, event: any) {
         .bind(nowIso(), suppressedEmail)
         .run()
       await audit(env, "compliance", "provider_suppression", "contact", suppressedEmail, {
-        reason: data.reason || null,
+        reason: providerReason,
+        normalized_reason: normalizedReason,
       })
+      if (normalizedReason === "email.complained") {
+        await evaluateReputationAndSafety(env)
+      }
       return { handled: true, suppression: true }
     }
   }
@@ -1093,8 +1234,29 @@ export async function handleResendEvent(env: Env, event: any) {
     )
       .bind(nowIso(), conversation.id)
       .run()
+
+    if (type === "email.complained") {
+      await evaluateReputationAndSafety(env)
+    }
   }
   return { handled: true }
+}
+
+
+export async function handleResendEvent(env: Env, event: any) {
+  const receipt = await claimWebhookEvent(env, event)
+  if (!receipt.claimed) {
+    return { handled: true, duplicate: true, event_key: receipt.event_key }
+  }
+
+  try {
+    const result = await processResendEventCore(env, event)
+    await markWebhookProcessed(env, receipt.event_key)
+    return result
+  } catch (error) {
+    await markWebhookFailed(env, receipt.event_key, error)
+    throw error
+  }
 }
 
 export async function recordWebsiteIntent(
@@ -1393,9 +1555,17 @@ export async function runQueueJob(
   } else if (kind === "learning") {
     result = await recomputeCommercialLearnings(env)
   } else {
-    result = {
-      ramp: await maybeAdjustRamp(env),
+    const reputation = await evaluateReputationAndSafety(env)
+    const ramp = await maybeAdjustRamp(env)
+    const report = await maybeSendDailyCommercialReport(env)
+    const resultBase: Record<string, unknown> = { reputation, ramp, report }
+
+    const lastDeliverability = await getSetting(env, "last_deliverability_check_at")
+    if (!lastDeliverability || Date.now() - new Date(lastDeliverability).getTime() > 6 * 3600_000) {
+      resultBase.deliverability = await runDeliverabilityChecks(env)
+      await setSetting(env, "last_deliverability_check_at", nowIso())
     }
+    result = resultBase
     const lastCleanup = await getSetting(env, "last_cleanup_at")
     if (!lastCleanup || Date.now() - new Date(lastCleanup).getTime() > 24 * 3600_000) {
       await cleanup(env)
@@ -1465,5 +1635,6 @@ export async function metrics(env: Env) {
   return {
     ...(row || {}),
     new_outreach_cap: await currentNewOutreachCap(env),
+    operations: await operationsSnapshot(env),
   }
 }

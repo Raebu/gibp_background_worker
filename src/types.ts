@@ -30,6 +30,7 @@ export interface Env {
   SERIOUS_THRESHOLD?: string
   DEFAULT_JURISDICTION_MODE?: string
   RETENTION_DAYS?: string
+  DAILY_REPORT_HOUR_UTC?: string
 
   RESEND_API_KEY?: string
   RESEND_WEBHOOK_SECRET?: string

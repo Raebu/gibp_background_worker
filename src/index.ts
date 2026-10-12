@@ -14,6 +14,12 @@ import {
   handleMeetingBookingSelection,
 } from "./experience"
 import { recordCommercialOutcome } from "./learning"
+import {
+  operationsSnapshot,
+  recordDeadLetter,
+  recordOperationsAlert,
+  setOutboundPaused,
+} from "./operations"
 
 const WEBSITE_EVENT_WINDOW_MS = 10 * 60 * 1000
 const WEBSITE_EVENT_MAX_REQUESTS = 60
@@ -191,11 +197,42 @@ async function handleAdmin(request: Request, env: Env, path: string) {
     }
   }
 
+  if (path === "/admin/operations" && request.method === "GET") {
+    const alerts = await env.GROWTH_DB.prepare(
+      "SELECT * FROM operations_alerts WHERE status='open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 100",
+    ).all()
+    const deadLetters = await env.GROWTH_DB.prepare(
+      "SELECT * FROM dead_letters WHERE status='dead' ORDER BY created_at DESC LIMIT 100",
+    ).all()
+    const attribution = await env.GROWTH_DB.prepare(
+      `SELECT ca.*,a.name AS account_name
+       FROM conversion_attribution ca
+       LEFT JOIN accounts a ON a.id=ca.account_id
+       ORDER BY ca.occurred_at DESC LIMIT 100`,
+    ).all()
+    return json({
+      ...(await operationsSnapshot(env)),
+      alerts: alerts.results || [],
+      dead_letters: deadLetters.results || [],
+      attribution: attribution.results || [],
+    })
+  }
+
+  if (path === "/admin/outbound-pause" && request.method === "POST") {
+    const body = (await bodyJson(request)) as any
+    if (typeof body?.paused !== "boolean") {
+      return json({ error: "paused_boolean_required" }, 400)
+    }
+    const reason = String(body.reason || (body.paused ? "manual_admin_pause" : "manual_admin_resume"))
+    return json(await setOutboundPaused(env, body.paused, reason, "admin"))
+  }
+
   if (path === "/admin/status" && request.method === "GET") {
     return json({
       ok: true,
       send_mode: env.SEND_MODE || "dry_run",
       metrics: await metrics(env),
+      operations: await operationsSnapshot(env),
       config: {
         d1: true,
         queue: Boolean(env.GROWTH_QUEUE),
@@ -388,6 +425,26 @@ export default {
       })
     }
 
+    if (url.pathname === "/dashboard/outbound-control" && request.method === "POST") {
+      if (!isAuthorized(request, env)) return unauthorized()
+      const form = await request.formData()
+      const action = String(form.get("action") || "")
+      const reason = String(form.get("reason") || "").trim()
+      if (!["pause", "resume"].includes(action)) {
+        return json({ error: "invalid_action" }, 400)
+      }
+      await setOutboundPaused(
+        env,
+        action === "pause",
+        reason || (action === "pause" ? "manual_dashboard_pause" : "manual_dashboard_resume"),
+        "admin",
+      )
+      return new Response(null, {
+        status: 303,
+        headers: { Location: "/dashboard", "Cache-Control": "no-store" },
+      })
+    }
+
     if (url.pathname === "/dashboard" && request.method === "GET") {
       return isAuthorized(request, env) ? renderDashboard(env) : renderDashboardLogin()
     }
@@ -445,7 +502,20 @@ export default {
       } catch {
         return json({ error: "invalid_json" }, 400)
       }
-      return json(await handleResendEvent(env, event))
+      try {
+        return json(await handleResendEvent(env, event))
+      } catch (error) {
+        await recordOperationsAlert(env, {
+          fingerprint: "resend-webhook-processing",
+          severity: "critical",
+          kind: "resend_webhook_processing_failed",
+          detail: {
+            error: error instanceof Error ? error.message : String(error),
+            type: (event as any)?.type || null,
+          },
+        })
+        return json({ error: "webhook_processing_failed" }, 500)
+      }
     }
 
     if (url.pathname === "/events/search" && request.method === "POST") {
@@ -570,7 +640,13 @@ export default {
           `GIBP growth queue job failed: ${message.body.kind}`,
           error instanceof Error ? error.stack : error,
         )
-        message.retry()
+        const attempts = Number((message as any).attempts || 1)
+        const deadLetter = await recordDeadLetter(env, message.body, error, attempts)
+        if (deadLetter.terminal) {
+          message.ack()
+        } else {
+          message.retry()
+        }
       }
     }
   },

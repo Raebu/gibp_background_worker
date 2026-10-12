@@ -21,6 +21,7 @@ export async function sendResend(
     replyTo?: string
     headers?: Record<string, string>
     includeComplianceFooter?: boolean
+    idempotencyKey?: string
   },
 ) {
   const dryRun = (env.SEND_MODE || "dry_run") !== "live"
@@ -61,6 +62,7 @@ export async function sendResend(
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json",
+      ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey.slice(0, 256) } : {}),
     },
     body: JSON.stringify({
       from: outboundFrom,
@@ -140,7 +142,7 @@ export async function recordOutbound(
 
 export async function sendInternalResend(
   env: Env,
-  input: { to: string; subject: string; text: string },
+  input: { to: string; subject: string; text: string; idempotencyKey?: string },
 ) {
   if (!env.HANDOFF_TO || input.to.toLowerCase() !== env.HANDOFF_TO.toLowerCase()) {
     throw new Error("Internal email recipient must match HANDOFF_TO")
@@ -154,6 +156,7 @@ export async function sendInternalResend(
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json",
+      ...(input.idempotencyKey ? { "Idempotency-Key": input.idempotencyKey.slice(0, 256) } : {}),
     },
     body: JSON.stringify({
       from: transactionalFrom,

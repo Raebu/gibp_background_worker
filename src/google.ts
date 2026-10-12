@@ -1,5 +1,6 @@
 import type { Env } from "./types"
 import { audit, nowIso } from "./db"
+import { recordConversionAttribution } from "./operations"
 
 type BusyWindow = { start: string; end: string }
 type MeetingSlot = { start: string; end: string; timezone: string; label: string }
@@ -429,6 +430,19 @@ export async function scheduleNativeGoogleMeeting(
      SET status='scheduled',scheduled_at=?,provider_response_json=?,updated_at=?
      WHERE id=?`,
   ).bind(selected.start, JSON.stringify(updatedProvider), nowIso(), meetingId).run()
+
+  await recordConversionAttribution(env, {
+    sourceKey: `meeting:${meetingId}`,
+    conversationId: meeting.conversation_id || null,
+    accountId: meeting.account_id || null,
+    stage: "meeting_booked",
+    source: "google_calendar",
+    metadata: {
+      event_id: payload.id || null,
+      meet_url: Boolean(payload.hangoutLink),
+    },
+    occurredAt: selected.start,
+  })
 
   await audit(env, "meeting", "google_calendar_scheduled", "meeting_request", meetingId, {
     account_name: meeting.account_name,
