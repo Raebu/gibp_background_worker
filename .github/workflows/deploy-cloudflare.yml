@@ -1177,7 +1177,9 @@ jobs:
           print_metrics | tee /tmp/revenue-os-e2e-final.json
 
 
-      - name: Prove persistent one-credit Apollo to QEV dry-run path
+      # This path intentionally remains off: it would spend an Apollo enrichment credit.
+      - name: Prove persistent one-credit Apollo to QEV dry-run path (disabled)
+        if: ${{ false }}
         shell: bash
         run: |
           set -euo pipefail
