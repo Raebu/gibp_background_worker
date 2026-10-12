@@ -166,6 +166,12 @@ jobs:
           if (!gscSites.includes("gibp.global") || !gscSites.includes("gibp.app")) {
             throw new Error("Both GIBP Search Console properties must remain configured")
           }
+          if (!String(config.vars.SUPABASE_AUTH_URL || "").includes("supabase.co")) {
+            throw new Error("Supabase Auth URL must be configured for gibp.app lifecycle events")
+          }
+          if (!String(config.vars.SUPABASE_PUBLISHABLE_KEY || "").startsWith("sb_publishable_")) {
+            throw new Error("Supabase publishable key must be configured for user-token verification")
+          }
           NODE
 
           SECRET_LIST=""
@@ -556,6 +562,9 @@ jobs:
           const gscSites = String(config.vars.GSC_SITE_URLS || "")
           if (!gscSites.includes("gibp.global") || !gscSites.includes("gibp.app")) {
             throw new Error("Dual-surface GSC configuration is required")
+          }
+          if (!String(config.vars.SUPABASE_AUTH_URL || "").includes("supabase.co")) {
+            throw new Error("Supabase Auth verification must remain configured")
           }
           NODE
           ! grep -R "reveal_phone_number: true" src
