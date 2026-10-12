@@ -42,6 +42,8 @@ export interface Env {
   INTENT_SIGNING_SECRET?: string
   ADMIN_TOKEN?: string
   SITE_EVENT_TOKEN?: string
+  SUPABASE_AUTH_URL?: string
+  SUPABASE_PUBLISHABLE_KEY?: string
   BUSINESS_POSTAL_ADDRESS?: string
   HANDOFF_TO?: string
   HANDOFF_WEBHOOK_URL?: string
