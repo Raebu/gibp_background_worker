@@ -93,7 +93,15 @@ jobs:
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment must remain disabled")
           NODE
 
-          SECRET_LIST="$(npx wrangler secret list)"
+          SECRET_LIST=""
+          for attempt in 1 2 3 4; do
+            if SECRET_LIST="$(npx wrangler secret list)"; then
+              break
+            fi
+            echo "Cloudflare secret-list attempt $attempt failed; retrying control-plane read."
+            sleep $((attempt * 5))
+          done
+          test -n "$SECRET_LIST"
           for required in RESEND_API_KEY UNSUBSCRIBE_SECRET QUICKEMAILVERIFICATION_API_KEY; do
             echo "$SECRET_LIST" | grep -q "$required" || {
               echo "Missing required live-outreach secret: $required"
@@ -135,9 +143,78 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler deploy | tee /tmp/wrangler-deploy.log
+
+          node - <<'NODE'
+          const fs = require("fs")
+          const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
+          config.vars = config.vars || {}
+          config.vars.RELEASE_SHA = process.env.GITHUB_SHA
+          fs.writeFileSync("wrangler.jsonc", JSON.stringify(config, null, 2) + "\n")
+          NODE
+
+          set +e
+          npx wrangler deploy 2>&1 | tee /tmp/wrangler-deploy.log
+          WRANGLER_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$WRANGLER_STATUS" -ne 0 ]; then
+            echo "Wrangler returned non-zero; checking for a successfully-created Worker version."
+
+            VERSIONS_JSON=""
+            for attempt in 1 2 3 4 5; do
+              if VERSIONS_JSON="$(curl --fail --silent --show-error \
+                --retry 2 --retry-delay 2 --retry-all-errors \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/versions?per_page=20")"; then
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+
+            echo "$VERSIONS_JSON" | jq -e '.success == true' >/dev/null
+            VERSION_ID="$(echo "$VERSIONS_JSON" | jq -r '
+              (.result // [])
+              | if type == "array" then . else (.items // .versions // []) end
+              | sort_by(.number // 0)
+              | last
+              | .id // empty
+            ')"
+            test -n "$VERSION_ID"
+            echo "Cloudflare fallback selected newest uploaded Worker version: $VERSION_ID"
+
+            DEPLOY_BODY="$(jq -cn \
+              --arg version "$VERSION_ID" \
+              --arg sha "$GITHUB_SHA" \
+              '{
+                strategy:"percentage",
+                versions:[{version_id:$version,percentage:100}],
+                annotations:{
+                  "workers/message":("GitHub release " + $sha + " activated after Wrangler response-parser failure"),
+                  "workers/triggered_by":"github-actions-fallback"
+                }
+              }')"
+
+            DEPLOY_RESPONSE=""
+            for attempt in 1 2 3 4 5; do
+              if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
+                --retry 2 --retry-delay 2 --retry-all-errors \
+                -X POST \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$DEPLOY_BODY" \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"; then
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "$DEPLOY_RESPONSE" | jq -e '.success == true' >/dev/null
+            echo "Cloudflare API fallback activated Worker version $VERSION_ID."
+          fi
+
           WORKER_URL="$(grep -Eo 'https://[^[:space:]]+\.workers\.dev' /tmp/wrangler-deploy.log | tail -1)"
-          test -n "$WORKER_URL"
+          if [ -z "$WORKER_URL" ]; then
+            WORKER_URL="https://growth.gibp.global"
+          fi
           echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
 
       - name: Verify public Worker health
@@ -148,6 +225,7 @@ jobs:
             if curl --fail --silent --show-error "$WORKER_URL/health" | tee /tmp/health.json; then
               grep -q '"ok":true' /tmp/health.json
               grep -q '"mode":"live"' /tmp/health.json
+              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/health.json
               exit 0
             fi
             sleep 3
@@ -162,6 +240,7 @@ jobs:
             if curl --fail --silent --show-error "https://growth.gibp.global/health" | tee /tmp/branded-health.json; then
               grep -q '"ok":true' /tmp/branded-health.json
               grep -q '"mode":"live"' /tmp/branded-health.json
+              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/branded-health.json
               exit 0
             fi
             sleep 5
