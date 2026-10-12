@@ -76,18 +76,16 @@ async function resolveIdentity(env: Env, payload: any, sourceSite: GibpSite) {
   if (email) links.push([`email:${email}`, "email"])
   if (domain) links.push([`domain:${domain}`, "domain"])
 
-  if (accountId || contactId) {
-    for (const [identityKey, identityType] of links) {
-      await env.GROWTH_DB.prepare(
-        `INSERT INTO identity_links
-          (identity_key,identity_type,account_id,contact_id,source_site,confidence,first_seen_at,last_seen_at)
-         VALUES (?,?,?,?,?,100,?,?)
-         ON CONFLICT(identity_key) DO UPDATE SET
-          account_id=COALESCE(excluded.account_id,identity_links.account_id),
-          contact_id=COALESCE(excluded.contact_id,identity_links.contact_id),
-          source_site=excluded.source_site,last_seen_at=excluded.last_seen_at`,
-      ).bind(identityKey,identityType,accountId,contactId,sourceSite,now,now).run()
-    }
+  for (const [identityKey, identityType] of links) {
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO identity_links
+        (identity_key,identity_type,account_id,contact_id,source_site,confidence,first_seen_at,last_seen_at)
+       VALUES (?,?,?,?,?,100,?,?)
+       ON CONFLICT(identity_key) DO UPDATE SET
+        account_id=COALESCE(excluded.account_id,identity_links.account_id),
+        contact_id=COALESCE(excluded.contact_id,identity_links.contact_id),
+        source_site=excluded.source_site,last_seen_at=excluded.last_seen_at`,
+    ).bind(identityKey,identityType,accountId,contactId,sourceSite,now,now).run()
   }
 
   return { accountId, contactId, externalUserId, email, domain }
@@ -186,6 +184,83 @@ async function updateLifecycle(
   return { stage, health_status:health }
 }
 
+function productUserStageForEvent(eventType: string, current: string | null) {
+  if (eventType === "subscription_cancelled" || eventType === "churned") return "former_customer"
+  if (["subscription_started","customer_created","payment_succeeded","payment_intent_completed"].includes(eventType)) return "customer"
+  if (["signup","login","onboarding_started","onboarding_completed","activated","beneficiary_added","payment_intent_created"].includes(eventType)) {
+    return current === "customer" ? "customer" : "trial"
+  }
+  if (["upgrade_intent","high_value_action","quote_requested"].includes(eventType)) {
+    return current || "lead"
+  }
+  return current || "trial"
+}
+
+async function updateProductUserLifecycle(
+  env: Env,
+  externalUserId: string,
+  sourceSite: GibpSite,
+  eventType: string,
+  occurredAt: string,
+) {
+  const current = await env.GROWTH_DB.prepare(
+    "SELECT * FROM product_user_lifecycle WHERE external_user_id=?",
+  ).bind(externalUserId).first<any>()
+  const stage = productUserStageForEvent(eventType,current?.stage || null)
+  const expansionDelta =
+    eventType === "upgrade_intent" ? 35 :
+    eventType === "high_value_action" ? 20 :
+    eventType === "payment_intent_completed" || eventType === "payment_succeeded" ? 12 :
+    eventType === "beneficiary_added" ? 5 : 0
+  const health = expansionDelta >= 20 ? "expansion" : current?.health_status === "dormant" ? "healthy" : current?.health_status || "healthy"
+  const now = nowIso()
+
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO product_user_lifecycle
+      (external_user_id,source_site,stage,onboarding_started_at,onboarding_completed_at,activated_at,
+       customer_since,churned_at,last_product_activity_at,health_status,expansion_score,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(external_user_id) DO UPDATE SET
+       source_site=excluded.source_site,
+       stage=excluded.stage,
+       onboarding_started_at=COALESCE(product_user_lifecycle.onboarding_started_at,excluded.onboarding_started_at),
+       onboarding_completed_at=COALESCE(product_user_lifecycle.onboarding_completed_at,excluded.onboarding_completed_at),
+       activated_at=COALESCE(product_user_lifecycle.activated_at,excluded.activated_at),
+       customer_since=CASE WHEN excluded.stage='customer' THEN COALESCE(product_user_lifecycle.customer_since,excluded.customer_since) ELSE product_user_lifecycle.customer_since END,
+       churned_at=CASE WHEN excluded.stage='former_customer' THEN excluded.churned_at WHEN excluded.stage IN ('trial','customer') THEN NULL ELSE product_user_lifecycle.churned_at END,
+       last_product_activity_at=excluded.last_product_activity_at,
+       health_status=excluded.health_status,
+       expansion_score=MIN(100,product_user_lifecycle.expansion_score+?),
+       updated_at=excluded.updated_at`,
+  ).bind(
+    externalUserId,sourceSite,stage,
+    eventType === "onboarding_started" ? occurredAt : null,
+    eventType === "onboarding_completed" ? occurredAt : null,
+    eventType === "activated" ? occurredAt : null,
+    stage === "customer" ? occurredAt : null,
+    stage === "former_customer" ? occurredAt : null,
+    occurredAt,health,expansionDelta,now,expansionDelta,
+  ).run()
+
+  if (expansionDelta >= 20) {
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO product_user_signals
+       (id,external_user_id,source_site,signal_type,score,status,detail_json,created_at,updated_at)
+       VALUES (?,?,?,?,?,'open',?,?,?)
+       ON CONFLICT(external_user_id,signal_type,status) DO UPDATE SET
+        score=MAX(product_user_signals.score,excluded.score),
+        detail_json=excluded.detail_json,updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),externalUserId,sourceSite,
+      eventType === "upgrade_intent" ? "expansion_intent" : "high_product_usage",
+      Math.min(100,Math.max(20,expansionDelta*2)),
+      JSON.stringify({event_type:eventType}),now,now,
+    ).run()
+  }
+
+  return { stage, health_status:health }
+}
+
 export async function recordProductEvent(
   env: Env,
   payload: any,
@@ -225,7 +300,14 @@ export async function recordProductEvent(
     ).bind(engagement,Math.ceil(engagement/2),nowIso(),identity.accountId).run()
   }
 
-  return { recorded:true,duplicate:false,event_key:eventKey,source_site:sourceSite,account_id:identity.accountId,contact_id:identity.contactId,lifecycle }
+  const userLifecycle = identity.externalUserId
+    ? await updateProductUserLifecycle(env,identity.externalUserId,sourceSite,eventType,occurredAt)
+    : null
+
+  return {
+    recorded:true,duplicate:false,event_key:eventKey,source_site:sourceSite,
+    account_id:identity.accountId,contact_id:identity.contactId,lifecycle,user_lifecycle:userLifecycle,
+  }
 }
 
 export async function lifecycleSendDecision(env: Env, accountId: string, isInitial: boolean) {
@@ -316,7 +398,37 @@ export async function runLifecycleMaintenance(env: Env) {
     ).bind(crypto.randomUUID(),row.account_id,row.source_site || "gibp.app",signalType,score,
       JSON.stringify({stage:row.stage,health_status:row.health_status,last_activity:row.last_product_activity_at}),now,now).run()
   }
-  return { reviewed:(rows.results || []).length }
+  await env.GROWTH_DB.prepare(
+    `UPDATE product_user_lifecycle SET health_status='dormant',updated_at=?
+     WHERE stage IN ('trial','customer') AND last_product_activity_at<datetime('now','-30 day') AND health_status!='dormant'`,
+  ).bind(now).run()
+  await env.GROWTH_DB.prepare(
+    `UPDATE product_user_lifecycle SET health_status='watch',updated_at=?
+     WHERE stage='trial' AND onboarding_started_at IS NOT NULL AND onboarding_completed_at IS NULL
+       AND onboarding_started_at<datetime('now','-2 day') AND last_product_activity_at>=datetime('now','-30 day')`,
+  ).bind(now).run()
+
+  const userRows=await env.GROWTH_DB.prepare(
+    `SELECT external_user_id,source_site,stage,health_status,expansion_score,last_product_activity_at
+     FROM product_user_lifecycle WHERE health_status IN ('dormant','watch','expansion')
+     ORDER BY expansion_score DESC,last_product_activity_at DESC LIMIT 1000`,
+  ).all<any>()
+  for(const row of userRows.results || []){
+    const signalType=row.health_status==="expansion"?"expansion_opportunity":row.health_status==="dormant"?"retention_risk":"onboarding_stalled"
+    const score=row.health_status==="expansion"?Math.max(60,Number(row.expansion_score || 0)):row.health_status==="dormant"?65:55
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO product_user_signals
+       (id,external_user_id,source_site,signal_type,score,status,detail_json,created_at,updated_at)
+       VALUES (?,?,?,?,?,'open',?,?,?)
+       ON CONFLICT(external_user_id,signal_type,status) DO UPDATE SET
+        score=excluded.score,detail_json=excluded.detail_json,updated_at=excluded.updated_at`,
+    ).bind(
+      crypto.randomUUID(),row.external_user_id,row.source_site || "gibp.app",signalType,score,
+      JSON.stringify({stage:row.stage,health_status:row.health_status,last_activity:row.last_product_activity_at}),now,now,
+    ).run()
+  }
+
+  return { reviewed:(rows.results || []).length, product_users_reviewed:(userRows.results || []).length }
 }
 
 async function storeJourneyCheck(env: Env,sourceSite:GibpSite,kind:string,ok:boolean,statusCode:number|null,durationMs:number,detail:unknown){
@@ -374,6 +486,9 @@ export async function surfaceSnapshot(env: Env) {
   const lifecycle=await env.GROWTH_DB.prepare(
     "SELECT stage,health_status,COUNT(*) total FROM account_lifecycle GROUP BY stage,health_status ORDER BY stage,health_status",
   ).all<any>()
+  const userLifecycle=await env.GROWTH_DB.prepare(
+    "SELECT stage,health_status,COUNT(*) total FROM product_user_lifecycle GROUP BY stage,health_status ORDER BY stage,health_status",
+  ).all<any>()
   const search=await env.GROWTH_DB.prepare(
     `SELECT source_site,SUM(clicks) clicks,SUM(impressions) impressions,ROUND(AVG(average_position),2) average_position,COUNT(*) queries
      FROM search_demand_sites GROUP BY source_site ORDER BY source_site`,
@@ -394,7 +509,16 @@ export async function surfaceSnapshot(env: Env) {
     `SELECT COALESCE(source_site,'unknown') source_site,stage,COUNT(*) total,COALESCE(SUM(value),0) value
      FROM conversion_attribution GROUP BY COALESCE(source_site,'unknown'),stage ORDER BY source_site,stage`,
   ).all<any>()
-  return {website_intent:intent.results || [],product:product.results || [],lifecycle:lifecycle.results || [],search:search.results || [],experiments:experiments.results || [],journey_health:journeys.results || [],attribution:attribution.results || []}
+  return {
+    website_intent:intent.results || [],
+    product:product.results || [],
+    lifecycle:lifecycle.results || [],
+    user_lifecycle:userLifecycle.results || [],
+    search:search.results || [],
+    experiments:experiments.results || [],
+    journey_health:journeys.results || [],
+    attribution:attribution.results || [],
+  }
 }
 
 export async function storeSurfaceDailyMetrics(env: Env) {
@@ -404,6 +528,7 @@ export async function storeSurfaceDailyMetrics(env: Env) {
     const payload={
       website_intent:snapshot.website_intent.filter((x:any)=>x.source_site===sourceSite),
       product:snapshot.product.filter((x:any)=>x.source_site===sourceSite),
+      user_lifecycle:snapshot.user_lifecycle,
       search:snapshot.search.filter((x:any)=>x.source_site===sourceSite),
       experiments:snapshot.experiments.filter((x:any)=>x.source_site===sourceSite),
       attribution:snapshot.attribution.filter((x:any)=>x.source_site===sourceSite),

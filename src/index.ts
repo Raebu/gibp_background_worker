@@ -71,7 +71,15 @@ function websiteRateAllowed(request: Request) {
 }
 
 function websiteJson(data: unknown, status: number, origin: string | null) {
-  const response = json(data, status)
+  const response = status === 204
+    ? new Response(null, {
+        status,
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      })
+    : json(data, status)
   if (origin) {
     response.headers.set("Access-Control-Allow-Origin", origin)
     response.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -312,6 +320,15 @@ async function handleAdmin(request: Request, env: Env, path: string) {
        FROM account_lifecycle l JOIN accounts a ON a.id=l.account_id
        ORDER BY CASE l.health_status WHEN 'expansion' THEN 0 WHEN 'watch' THEN 1 WHEN 'dormant' THEN 2 ELSE 3 END,
                 l.expansion_score DESC,l.updated_at DESC LIMIT 500`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/product-users" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT * FROM product_user_lifecycle
+       ORDER BY CASE health_status WHEN 'expansion' THEN 0 WHEN 'watch' THEN 1 WHEN 'dormant' THEN 2 ELSE 3 END,
+                expansion_score DESC,updated_at DESC LIMIT 1000`,
     ).all()
     return json(rows.results || [])
   }
