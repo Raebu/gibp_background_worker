@@ -3,6 +3,7 @@ import { countToday } from "./db"
 import { currentNewOutreachCap } from "./ramp"
 import { outboundPauseState } from "./operations"
 import { accountGovernanceDecision, assessContactQuality } from "./assurance"
+import { lifecycleSendDecision } from "./surfaces"
 
 const genericMailboxPattern =
   /^(info|contact|hello|enquiries?|inquiries?|support|sales|commercial|office|admin|marketing|press|media|privacy|security|abuse|help|customerservice|customer\.service|partnerships?|alliances?|procurement|supplier|vendors?)\d*$/i
@@ -38,6 +39,9 @@ export async function canSendTo(
 
   const governance = await accountGovernanceDecision(env, account.id)
   if (!governance.allowed) return { allowed: false, reason: governance.reason }
+
+  const lifecycle = await lifecycleSendDecision(env, account.id, isInitial)
+  if (!lifecycle.allowed) return { allowed: false, reason: lifecycle.reason }
 
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
   if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }

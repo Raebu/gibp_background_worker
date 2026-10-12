@@ -433,11 +433,24 @@ export async function funnelSnapshot(env: Env) {
      ORDER BY conversations DESC LIMIT 20`,
   ).all<any>()
 
+  const bySite = await env.GROWTH_DB.prepare(
+    `SELECT COALESCE(NULLIF(source_site,''),'unknown') AS dimension,
+            COUNT(*) AS attributed_events,
+            SUM(CASE WHEN stage IN ('meeting_requested','meeting_booked') THEN 1 ELSE 0 END) AS meetings,
+            SUM(CASE WHEN stage IN ('qualified_opportunity','proposal_requested','proposal_sent') THEN 1 ELSE 0 END) AS opportunities,
+            SUM(CASE WHEN stage IN ('won','partner_agreed') THEN 1 ELSE 0 END) AS won,
+            COALESCE(SUM(CASE WHEN stage IN ('won','partner_agreed') THEN value ELSE 0 END),0) AS won_value
+     FROM conversion_attribution
+     GROUP BY COALESCE(NULLIF(source_site,''),'unknown')
+     ORDER BY attributed_events DESC`,
+  ).all<any>()
+
   return {
     totals: totals || {},
     by_source: bySource.results || [],
     by_country: byCountry.results || [],
     by_segment: bySegment.results || [],
+    by_site: bySite.results || [],
   }
 }
 

@@ -119,6 +119,37 @@ jobs:
           test "$CONTACT_COLUMNS" -eq 2
           echo "Contact freshness evidence columns verified."
 
+      - name: Verify multi-surface lifecycle schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          SURFACE_TABLE_COUNT="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT COUNT(*) AS total
+            FROM sqlite_master
+            WHERE type='table'
+              AND name IN (
+                'account_lifecycle',
+                'identity_links',
+                'product_events',
+                'lifecycle_signals',
+                'search_demand_sites',
+                'surface_experiment_assignments',
+                'surface_experiment_events',
+                'synthetic_journey_checks',
+                'site_daily_metrics'
+              );
+          " | jq '[.. | objects | .total? | numbers] | max // 0')"
+          test "$SURFACE_TABLE_COUNT" -eq 9
+          echo "Multi-surface lifecycle schema verified: $SURFACE_TABLE_COUNT/9 tables."
+
+          for table in website_intent conversion_requests meeting_requests conversion_attribution; do
+            COLUMN_COUNT="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
+              SELECT COUNT(*) AS total FROM pragma_table_info('$table') WHERE name='source_site';
+            " | jq '[.. | objects | .total? | numbers] | max // 0')"
+            test "$COLUMN_COUNT" -eq 1
+          done
+          echo "Source-site attribution columns verified on all commercial event surfaces."
+
       - name: Preflight controlled live ramp
         shell: bash
         run: |
@@ -129,6 +160,10 @@ jobs:
           if (config.vars.SEND_MODE !== "live") throw new Error("Controlled rollout requires SEND_MODE=live")
           if (config.vars.RAMP_START_CAP !== "5") throw new Error("Controlled rollout requires RAMP_START_CAP=5")
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment must remain disabled")
+          const gscSites = String(config.vars.GSC_SITE_URLS || "")
+          if (!gscSites.includes("gibp.global") || !gscSites.includes("gibp.app")) {
+            throw new Error("Both GIBP Search Console properties must remain configured")
+          }
           NODE
 
           SECRET_LIST=""
@@ -171,6 +206,11 @@ jobs:
                     g.never_contact=1 OR
                     ((g.manual_review_required=1 OR g.vip=1) AND g.manual_review_approved_at IS NULL)
                   )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM account_lifecycle l
+                WHERE l.account_id=a.id
+                  AND l.stage IN ('trial','customer','partner','former_customer')
               )
               AND q.result='valid'
               AND q.safe_to_send=1
@@ -370,6 +410,17 @@ jobs:
           curl --fail --silent --show-error "https://growth.gibp.global/briefing?gi=invalid" | tee /tmp/briefing.html
           grep -q "Briefing unavailable" /tmp/briefing.html
 
+      - name: Verify both GIBP website collectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          for origin in https://www.gibp.global https://www.gibp.app; do
+            headers="$(mktemp)"
+            curl --fail --silent --show-error               -X OPTIONS               -H "Origin: $origin"               -D "$headers"               -o /dev/null               "$WORKER_URL/events/website"
+            grep -Fiq "access-control-allow-origin: $origin" "$headers"
+          done
+          echo "gibp.global and gibp.app are both accepted by the shared intent collector."
+
       - name: Ensure internal unsubscribe secret exists
         shell: bash
         run: |
@@ -499,6 +550,10 @@ jobs:
           }
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") {
             throw new Error("APOLLO_ENRICHMENT_DAILY_CAP must remain exactly 0")
+          }
+          const gscSites = String(config.vars.GSC_SITE_URLS || "")
+          if (!gscSites.includes("gibp.global") || !gscSites.includes("gibp.app")) {
+            throw new Error("Dual-surface GSC configuration is required")
           }
           NODE
           ! grep -R "reveal_phone_number: true" src

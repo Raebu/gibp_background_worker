@@ -7,6 +7,7 @@ import { operationsSnapshot, recordConversionAttribution } from "./operations"
 import { funnelSnapshot, heartbeatHealth } from "./assurance"
 import { crmSnapshot } from "./crm"
 import { experimentSnapshot } from "./experiments"
+import { surfaceSnapshot } from "./surfaces"
 
 function esc(value: unknown) {
   return String(value ?? "")
@@ -155,6 +156,24 @@ async function requestBody(request: Request) {
   return Object.fromEntries(form.entries())
 }
 
+async function recentSourceSite(env: Env, conversationId: string | null | undefined, request?: Request) {
+  if (conversationId) {
+    const recent = await env.GROWTH_DB.prepare(
+      `SELECT source_site FROM website_intent
+       WHERE conversation_id=? AND source_site IN ('gibp.global','gibp.app')
+       ORDER BY created_at DESC LIMIT 1`,
+    ).bind(conversationId).first<{ source_site: string }>()
+    if (recent?.source_site) return recent.source_site
+  }
+  if (request) {
+    try {
+      const host = new URL(request.headers.get("referer") || "").hostname.toLowerCase().replace(/^www\./,"")
+      if (host === "gibp.global" || host === "gibp.app") return host
+    } catch {}
+  }
+  return null
+}
+
 const conversionScores: Record<string, number> = {
   architecture_review: 30,
   readiness_assessment: 20,
@@ -180,13 +199,14 @@ export async function handleConversionRequest(request: Request, env: Env) {
   const score = conversionScores[kind]
   const now = nowIso()
   const requestId = id()
+  const sourceSite = await recentSourceSite(env, context.conversation.id, request)
   await env.GROWTH_DB.prepare(
     `INSERT INTO conversion_requests
-     (id,account_id,contact_id,conversation_id,kind,status,score,payload_json,created_at,updated_at)
-     VALUES (?,?,?,?,?,'new',?,'{}',?,?)`,
+     (id,account_id,contact_id,conversation_id,kind,status,score,payload_json,created_at,updated_at,source_site)
+     VALUES (?,?,?,?,?,'new',?,'{}',?,?,?)`,
   ).bind(
     requestId, context.account.id, context.contact?.id || null, context.conversation.id,
-    kind, score, now, now,
+    kind, score, now, now, sourceSite,
   ).run()
 
   await recordConversionAttribution(env, {
@@ -197,6 +217,7 @@ export async function handleConversionRequest(request: Request, env: Env) {
     source: "private_briefing",
     metadata: { kind, score },
     occurredAt: now,
+    sourceSite,
   })
 
   await env.GROWTH_DB.prepare(
@@ -316,10 +337,11 @@ export async function renderAssessment(request: Request, env: Env, type: string)
   const conversionKind = type === "cross-border-friction" ? "cross_border_assessment"
     : type === "liquidity-efficiency" ? "liquidity_review" : "readiness_assessment"
 
+  const assessmentSourceSite = await recentSourceSite(env, context?.conversation?.id || null, request)
   await env.GROWTH_DB.prepare(
     `INSERT INTO conversion_requests
-     (id,account_id,contact_id,conversation_id,kind,status,score,payload_json,created_at,updated_at)
-     VALUES (?,?,?,?,?,'completed',?,?,?,?)`,
+     (id,account_id,contact_id,conversation_id,kind,status,score,payload_json,created_at,updated_at,source_site)
+     VALUES (?,?,?,?,?,'completed',?,?,?,?,?)`,
   ).bind(
     id(), context?.account?.id || null, context?.contact?.id || null,
     context?.conversation?.id || null, conversionKind, score,
@@ -329,7 +351,7 @@ export async function renderAssessment(request: Request, env: Env, type: string)
       organisation:String(body.organisation || "").slice(0,200),
       work_email:String(body.work_email || "").slice(0,320),
       contact_me:body.contact_me === "yes",
-    }), nowIso(), nowIso(),
+    }), nowIso(), nowIso(), assessmentSourceSite,
   ).run()
 
   if (context?.conversation) {
@@ -442,6 +464,7 @@ export async function renderDashboard(env: Env) {
   const funnel = await funnelSnapshot(env)
   const experiments = await experimentSnapshot(env)
   const crm = await crmSnapshot(env)
+  const surfaces = await surfaceSnapshot(env)
   const quality = await env.GROWTH_DB.prepare(
     `SELECT
       COUNT(*) AS scored,
@@ -466,6 +489,25 @@ export async function renderDashboard(env: Env) {
   const cards = Object.entries(metrics || {}).map(([k,v]) =>
     `<div class="card"><div class="tag">${esc(k.replaceAll("_"," "))}</div><div class="score" style="font-size:46px">${esc(v)}</div></div>`
   ).join("")
+
+  const surfaceCards = ["gibp.global","gibp.app"].map((site) => {
+    const intent = surfaces.website_intent.find((x:any) => x.source_site === site) || {}
+    const product = surfaces.product.find((x:any) => x.source_site === site) || {}
+    const search = surfaces.search.find((x:any) => x.source_site === site) || {}
+    const journey = surfaces.journey_health.filter((x:any) => x.source_site === site)
+    const healthy = journey.length ? journey.every((x:any) => Number(x.ok) === 1) : null
+    return `<section class="card">
+      <div class="tag">${esc(site)}</div>
+      <h2>${site === "gibp.global" ? "Institutional acquisition" : "Product & activation"}</h2>
+      <div class="grid">
+        <div><strong>Intent events</strong><div class="score" style="font-size:30px">${esc(intent.events || 0)}</div></div>
+        <div><strong>Product events</strong><div class="score" style="font-size:30px">${esc(product.events || 0)}</div></div>
+        <div><strong>Search clicks</strong><div class="score" style="font-size:30px">${esc(search.clicks || 0)}</div></div>
+        <div><strong>Journey</strong><div class="score" style="font-size:26px">${healthy == null ? "pending" : healthy ? "healthy" : "degraded"}</div></div>
+      </div>
+      ${site === "gibp.app" ? `<p>Signups ${esc(product.signups || 0)} · onboarding complete ${esc(product.onboarding_completed || 0)} · activated ${esc(product.activated || 0)} · customer events ${esc(product.customer_events || 0)}</p>` : `<p>High-intent events ${esc(intent.high_intent || 0)} · indexed queries ${esc(search.queries || 0)}</p>`}
+    </section>`
+  }).join("")
 
   return page(
     "GIBP Autonomous Market Development Desk",
@@ -508,6 +550,12 @@ export async function renderDashboard(env: Env) {
        </section>
      </div>
      <div class="grid">${cards}</div>
+     <section class="card"><h2>Shared GIBP surface intelligence</h2>
+       <p>One commercial brain, with acquisition and product behaviour attributed separately across <strong>gibp.global</strong> and <strong>gibp.app</strong>.</p>
+       <div class="grid">${surfaceCards}</div>
+       <h3 style="margin-top:22px">Customer lifecycle</h3>
+       ${surfaces.lifecycle.map((x:any)=>`<div class="signal"><strong>${esc(x.stage)} · ${esc(x.health_status)}</strong><div>${esc(x.total)} accounts</div></div>`).join("") || "<p>No product-linked lifecycle records yet.</p>"}
+     </section>
      <section class="card"><h2>Commercial funnel</h2>
        <div class="grid">
          ${Object.entries(funnel.totals || {}).map(([k,v])=>`<div><div class="tag">${esc(k.replaceAll("_"," "))}</div><div class="score" style="font-size:30px">${esc(v)}</div></div>`).join("")}

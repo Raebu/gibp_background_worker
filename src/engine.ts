@@ -41,6 +41,13 @@ import {
   evaluateExperiments,
   recordExperimentEvent,
 } from "./experiments"
+import type { GibpSite } from "./surfaces"
+import {
+  canonicalSourceSite,
+  runLifecycleMaintenance,
+  runSyntheticJourneyChecks,
+  storeSurfaceDailyMetrics,
+} from "./surfaces"
 import {
   claimOutboundDispatch,
   claimWebhookEvent,
@@ -1322,7 +1329,7 @@ export async function handleResendEvent(env: Env, event: any) {
 export async function recordWebsiteIntent(
   env: Env,
   payload: any,
-  options: { trusted?: boolean } = {},
+  options: { trusted?: boolean; sourceSite?: GibpSite | null } = {},
 ) {
   const weightMap: Record<string, number> = {
     page_view: 2,
@@ -1343,6 +1350,9 @@ export async function recordWebsiteIntent(
   const weight = options.trusted
     ? Math.max(1, Math.min(50, Number(payload.weight || baseWeight)))
     : baseWeight
+  const sourceSite =
+    options.sourceSite ||
+    canonicalSourceSite(payload?.source_site || payload?.metadata?.site, "gibp.global")
 
   let conversationId: string | null = null
   let contactId: string | null = null
@@ -1384,15 +1394,15 @@ export async function recordWebsiteIntent(
 
   const metadata = payload.metadata && typeof payload.metadata === "object"
     ? {
-        site: String(payload.metadata.site || "").slice(0, 80),
+        site: sourceSite,
         source: String(payload.metadata.source || "").slice(0, 80),
       }
-    : {}
+    : { site: sourceSite, source: "" }
 
   await env.GROWTH_DB.prepare(
     `INSERT INTO website_intent
-      (id,account_id,contact_id,conversation_id,event_type,path,weight,metadata_json,created_at)
-     VALUES (?,?,?,?,?,?,?,?,?)`,
+      (id,account_id,contact_id,conversation_id,event_type,path,weight,metadata_json,created_at,source_site)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
   )
     .bind(
       id(),
@@ -1404,6 +1414,7 @@ export async function recordWebsiteIntent(
       weight,
       JSON.stringify({ ...metadata, attributed }),
       nowIso(),
+      sourceSite,
     )
     .run()
 
@@ -1421,7 +1432,7 @@ export async function recordWebsiteIntent(
       .bind(weight, Math.ceil(weight / 2), nowIso(), accountId)
       .run()
   }
-  return { recorded: true, event_type: eventType, weight, attributed }
+  return { recorded: true, event_type: eventType, weight, attributed, source_site: sourceSite }
 }
 
 export async function importData(env: Env, body: any) {
@@ -1632,6 +1643,8 @@ export async function runQueueJob(
     const quality = await refreshContactQualityBatch(env)
     const experiments = await evaluateExperiments(env)
     const funnel = await storeDailyFunnelSnapshot(env)
+    const lifecycle = await runLifecycleMaintenance(env)
+    const surfaces = await storeSurfaceDailyMetrics(env)
     const heartbeat = await heartbeatHealth(env)
     const resultBase: Record<string, unknown> = {
       reputation,
@@ -1640,6 +1653,8 @@ export async function runQueueJob(
       quality,
       experiments,
       funnel,
+      lifecycle,
+      surfaces,
       heartbeat,
     }
 
@@ -1655,6 +1670,23 @@ export async function runQueueJob(
       })
     } else {
       await resolveOperationsAlert(env, "job-heartbeat-sla")
+    }
+
+    const lastSurfaceJourneyCheck = await getSetting(env, "last_surface_journey_check_at")
+    if (!lastSurfaceJourneyCheck || Date.now() - new Date(lastSurfaceJourneyCheck).getTime() > 6 * 3600_000) {
+      const journeys = await runSyntheticJourneyChecks(env)
+      resultBase.synthetic_journeys = journeys
+      await setSetting(env, "last_surface_journey_check_at", nowIso())
+      if (!journeys.ok) {
+        await recordOperationsAlert(env, {
+          fingerprint: "multi-surface-journey-health",
+          severity: "critical",
+          kind: "multi_surface_journey_degraded",
+          detail: journeys.results.filter((x: any) => !x.ok),
+        })
+      } else {
+        await resolveOperationsAlert(env, "multi-surface-journey-health")
+      }
     }
 
     const lastHolidaySync = await getSetting(env, "last_holiday_sync_at")

@@ -18,6 +18,14 @@ import { crmSnapshot, ingestCrmEvent } from "./crm"
 import { experimentSnapshot } from "./experiments"
 import { funnelSnapshot, heartbeatHealth, upsertSendingBlackout } from "./assurance"
 import {
+  assignSurfaceExperiment,
+  canonicalSourceSite,
+  recordProductEvent,
+  recordSurfaceExperimentEvent,
+  sourceSiteFromOrigin,
+  surfaceSnapshot,
+} from "./surfaces"
+import {
   operationsSnapshot,
   recordDeadLetter,
   recordOperationsAlert,
@@ -294,6 +302,20 @@ async function handleAdmin(request: Request, env: Env, path: string) {
     return json(await crmSnapshot(env))
   }
 
+  if (path === "/admin/surfaces" && request.method === "GET") {
+    return json(await surfaceSnapshot(env))
+  }
+
+  if (path === "/admin/lifecycle" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT l.*,a.name,a.domain,a.country_code
+       FROM account_lifecycle l JOIN accounts a ON a.id=l.account_id
+       ORDER BY CASE l.health_status WHEN 'expansion' THEN 0 WHEN 'watch' THEN 1 WHEN 'dormant' THEN 2 ELSE 3 END,
+                l.expansion_score DESC,l.updated_at DESC LIMIT 500`,
+    ).all()
+    return json(rows.results || [])
+  }
+
   if (path === "/admin/operations" && request.method === "GET") {
     const alerts = await env.GROWTH_DB.prepare(
       "SELECT * FROM operations_alerts WHERE status='open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 100",
@@ -345,6 +367,8 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         handoff: Boolean(env.HANDOFF_TO || env.HANDOFF_WEBHOOK_URL),
         apollo_candidate_search: Boolean(env.APOLLO_API_KEY),
         quickemailverification: Boolean(env.QUICKEMAILVERIFICATION_API_KEY),
+        multi_surface: true,
+        sites: ["gibp.global","gibp.app"],
         crm: Boolean(
           env.CRM_WEBHOOK_URL ||
           env.HUBSPOT_PRIVATE_APP_TOKEN ||
@@ -751,11 +775,74 @@ export default {
 
       const body = await bodyJson(request)
       if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
+      const sourceSite =
+        sourceSiteFromOrigin(origin) ||
+        (trusted ? canonicalSourceSite((body as any)?.source_site || (body as any)?.metadata?.site) : null)
       return websiteJson(
-        await recordWebsiteIntent(env, body, { trusted }),
+        await recordWebsiteIntent(env, body, { trusted, sourceSite }),
         200,
         origin,
       )
+    }
+
+    if (url.pathname === "/events/product") {
+      const origin = allowedWebsiteOrigin(request)
+      const trusted = isSiteAuthorized(request, env)
+      if (request.method === "OPTIONS") {
+        if (!origin) return unauthorized()
+        return websiteJson({ ok: true }, 204, origin)
+      }
+      if (request.method !== "POST") return websiteJson({ error: "method_not_allowed" }, 405, origin)
+      if (!trusted) return websiteJson({ error: "trusted_product_event_required" }, 401, origin)
+      const body = await bodyJson(request)
+      if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
+      try {
+        const sourceSite = sourceSiteFromOrigin(origin) || canonicalSourceSite((body as any)?.source_site || (body as any)?.site, "gibp.app")
+        return websiteJson(await recordProductEvent(env, body, { trusted, sourceSite }), 200, origin)
+      } catch (error) {
+        return websiteJson({ error: error instanceof Error ? error.message : "invalid_product_event" }, 400, origin)
+      }
+    }
+
+    if (url.pathname === "/experiments/assign") {
+      const origin = allowedWebsiteOrigin(request)
+      if (request.method === "OPTIONS") {
+        if (!origin) return unauthorized()
+        return websiteJson({ ok: true }, 204, origin)
+      }
+      if (request.method !== "POST") return websiteJson({ error: "method_not_allowed" }, 405, origin)
+      if (!origin && !isSiteAuthorized(request, env)) return unauthorized()
+      if (!isSiteAuthorized(request, env) && !websiteRateAllowed(request)) {
+        return websiteJson({ error: "rate_limited" }, 429, origin)
+      }
+      const body = await bodyJson(request) as any
+      if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
+      try {
+        const sourceSite = sourceSiteFromOrigin(origin) || canonicalSourceSite(body.source_site)
+        return websiteJson(await assignSurfaceExperiment(env, { ...body, source_site: sourceSite }), 200, origin)
+      } catch (error) {
+        return websiteJson({ error: error instanceof Error ? error.message : "invalid_experiment" }, 400, origin)
+      }
+    }
+
+    if (url.pathname === "/events/experiment") {
+      const origin = allowedWebsiteOrigin(request)
+      if (request.method === "OPTIONS") {
+        if (!origin) return unauthorized()
+        return websiteJson({ ok: true }, 204, origin)
+      }
+      if (request.method !== "POST") return websiteJson({ error: "method_not_allowed" }, 405, origin)
+      if (!origin && !isSiteAuthorized(request, env)) return unauthorized()
+      if (!isSiteAuthorized(request, env) && !websiteRateAllowed(request)) {
+        return websiteJson({ error: "rate_limited" }, 429, origin)
+      }
+      const body = await bodyJson(request) as any
+      if (!body) return websiteJson({ error: "invalid_json" }, 400, origin)
+      try {
+        return websiteJson(await recordSurfaceExperimentEvent(env, body, sourceSiteFromOrigin(origin)), 200, origin)
+      } catch (error) {
+        return websiteJson({ error: error instanceof Error ? error.message : "invalid_experiment_event" }, 400, origin)
+      }
     }
 
     if (url.pathname === "/unsubscribe" && (request.method === "GET" || request.method === "POST")) {
