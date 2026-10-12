@@ -36,6 +36,7 @@ import {
   maybeSendDailyCommercialReport,
   operationsSnapshot,
   outboundPauseState,
+  recordConversionAttribution,
   runDeliverabilityChecks,
 } from "./operations"
 
@@ -841,6 +842,19 @@ async function createHandoff(
   )
     .bind(nowIso(), nowIso(), conversation.id)
     .run()
+
+  await recordConversionAttribution(env, {
+    sourceKey: `handoff:${conversation.id}`,
+    conversationId: conversation.id,
+    accountId: account.id,
+    stage: "qualified_opportunity",
+    source: "serious_handoff",
+    metadata: {
+      intent: classification.intent,
+      score: briefing.conversation_score,
+      qualification_completeness: qualification?.completeness ?? null,
+    },
+  })
 
   if (env.HANDOFF_TO) {
     const result = await sendInternalResend(env, {
