@@ -428,22 +428,42 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
     }
 
     const now = nowIso()
-    const contactId = id()
-    await env.GROWTH_DB.prepare(
-      `INSERT INTO contacts
-        (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
-         seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
-       VALUES (?,?,?,?,?,'apollo_verified',NULL,?,0,1,?,'unknown',
-         'third_party_professional_data_review_required','research_only',?,?)
-       ON CONFLICT DO UPDATE SET
-         account_id=excluded.account_id,
-         name=excluded.name,
-         role=excluded.role,
-         verified=MAX(contacts.verified,excluded.verified),
-         seniority_score=MAX(contacts.seniority_score,excluded.seniority_score),
-         updated_at=excluded.updated_at`,
-    )
-      .bind(
+    const existingContact = await env.GROWTH_DB.prepare(
+      "SELECT id FROM contacts WHERE lower(email)=lower(?) LIMIT 1",
+    ).bind(email).first<{ id: string }>()
+    const contactId = existingContact?.id || id()
+
+    if (existingContact?.id) {
+      await env.GROWTH_DB.prepare(
+        `UPDATE contacts
+         SET account_id=?,
+             name=?,
+             role=?,
+             email=?,
+             email_source='apollo_verified',
+             country_code=COALESCE(?,country_code),
+             verified=1,
+             seniority_score=MAX(seniority_score,?),
+             updated_at=?
+         WHERE id=?`,
+      ).bind(
+        candidate.account_id,
+        name,
+        title,
+        email,
+        candidate.country_code,
+        titleScore,
+        now,
+        contactId,
+      ).run()
+    } else {
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO contacts
+          (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
+           seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+         VALUES (?,?,?,?,?,'apollo_verified',NULL,?,0,1,?,'unknown',
+           'third_party_professional_data_review_required','research_only',?,?)`,
+      ).bind(
         contactId,
         candidate.account_id,
         name,
@@ -453,8 +473,8 @@ export async function enrichTopApolloCandidate(env: Env, commissioningCap?: numb
         titleScore,
         now,
         now,
-      )
-      .run()
+      ).run()
+    }
 
     await env.GROWTH_DB.prepare(
       "UPDATE contact_candidates SET status='enriched', metadata_json=?, updated_at=? WHERE id=?",
