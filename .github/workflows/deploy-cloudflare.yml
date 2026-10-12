@@ -29,6 +29,11 @@ jobs:
       CALENDAR_GOOGLE_CLIENT_ID: ${{ secrets.CALENDAR_GOOGLE_CLIENT_ID }}
       CALENDAR_GOOGLE_CLIENT_SECRET: ${{ secrets.CALENDAR_GOOGLE_CLIENT_SECRET }}
       CALENDAR_GOOGLE_REFRESH_TOKEN: ${{ secrets.CALENDAR_GOOGLE_REFRESH_TOKEN }}
+      CRM_WEBHOOK_URL: ${{ secrets.CRM_WEBHOOK_URL }}
+      CRM_WEBHOOK_SECRET: ${{ secrets.CRM_WEBHOOK_SECRET }}
+      HUBSPOT_PRIVATE_APP_TOKEN: ${{ secrets.HUBSPOT_PRIVATE_APP_TOKEN }}
+      SALESFORCE_INSTANCE_URL: ${{ secrets.SALESFORCE_INSTANCE_URL }}
+      SALESFORCE_ACCESS_TOKEN: ${{ secrets.SALESFORCE_ACCESS_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -81,6 +86,39 @@ jobs:
           test "$TABLE_COUNT" -eq 7
           echo "Live operations hardening schema verified: $TABLE_COUNT/7 tables."
 
+      - name: Verify gold-standard commercial schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          GOLD_TABLE_COUNT="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT COUNT(*) AS total
+            FROM sqlite_master
+            WHERE type='table'
+              AND name IN (
+                'job_heartbeats',
+                'account_governance',
+                'contact_data_quality',
+                'sending_blackouts',
+                'crm_sync_records',
+                'crm_inbound_events',
+                'experiments',
+                'experiment_variants',
+                'experiment_assignments',
+                'experiment_events',
+                'funnel_snapshots'
+              );
+          " | jq '[.. | objects | .total? | numbers] | max // 0')"
+          test "$GOLD_TABLE_COUNT" -eq 11
+          echo "Gold-standard commercial schema verified: $GOLD_TABLE_COUNT/11 tables."
+
+          CONTACT_COLUMNS="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT COUNT(*) AS total
+            FROM pragma_table_info('contacts')
+            WHERE name IN ('identity_verified_at','role_verified_at');
+          " | jq '[.. | objects | .total? | numbers] | max // 0')"
+          test "$CONTACT_COLUMNS" -eq 2
+          echo "Contact freshness evidence columns verified."
+
       - name: Preflight controlled live ramp
         shell: bash
         run: |
@@ -124,6 +162,16 @@ jobs:
             WHERE ct.status='active'
               AND trim(COALESCE(ct.name,''))<>''
               AND ct.verified=1
+              AND COALESCE(ct.identity_verified_at,ct.updated_at) >= datetime('now','-90 day')
+              AND COALESCE(ct.role_verified_at,ct.updated_at) >= datetime('now','-90 day')
+              AND NOT EXISTS (
+                SELECT 1 FROM account_governance g
+                WHERE g.account_id=a.id
+                  AND (
+                    g.never_contact=1 OR
+                    ((g.manual_review_required=1 OR g.vip=1) AND g.manual_review_approved_at IS NULL)
+                  )
+              )
               AND q.result='valid'
               AND q.safe_to_send=1
               AND q.disposable=0
@@ -395,6 +443,28 @@ jobs:
           sync_secret CALENDAR_GOOGLE_CLIENT_ID "${CALENDAR_GOOGLE_CLIENT_ID:-}"
           sync_secret CALENDAR_GOOGLE_CLIENT_SECRET "${CALENDAR_GOOGLE_CLIENT_SECRET:-}"
           sync_secret CALENDAR_GOOGLE_REFRESH_TOKEN "${CALENDAR_GOOGLE_REFRESH_TOKEN:-}"
+
+      - name: Sync optional CRM integration secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sync_secret() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              printf '%s' "$value" | npx wrangler secret put "$name" >/dev/null
+              echo "$name configured."
+            else
+              echo "$name not configured; related CRM integration will skip safely."
+            fi
+          }
+
+          sync_secret CRM_WEBHOOK_URL "${CRM_WEBHOOK_URL:-}"
+          sync_secret CRM_WEBHOOK_SECRET "${CRM_WEBHOOK_SECRET:-}"
+          sync_secret HUBSPOT_PRIVATE_APP_TOKEN "${HUBSPOT_PRIVATE_APP_TOKEN:-}"
+          sync_secret SALESFORCE_INSTANCE_URL "${SALESFORCE_INSTANCE_URL:-}"
+          sync_secret SALESFORCE_ACCESS_TOKEN "${SALESFORCE_ACCESS_TOKEN:-}"
 
       - name: Verify QuickEmailVerification integration in sandbox
         shell: bash
