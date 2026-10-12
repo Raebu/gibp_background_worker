@@ -90,12 +90,23 @@ function threeDaysAgo() {
 }
 
 export function googleSearchConsoleConfigured(env: Env) {
+  const sites = String(env.GSC_SITE_URLS || env.GSC_SITE_URL || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
   return Boolean(
     env.GSC_GOOGLE_CLIENT_ID &&
       env.GSC_GOOGLE_CLIENT_SECRET &&
       env.GSC_GOOGLE_REFRESH_TOKEN &&
-      env.GSC_SITE_URL,
+      sites.length,
   )
+}
+
+function searchConsoleSurface(siteUrl: string) {
+  const normalized = siteUrl.trim().toLowerCase()
+  if (normalized.includes("gibp.app")) return "gibp.app"
+  if (normalized.includes("gibp.global")) return "gibp.global"
+  return normalized.replace(/^sc-domain:/, "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "")
 }
 
 export async function syncGoogleSearchDemand(env: Env) {
@@ -109,111 +120,139 @@ export async function syncGoogleSearchDemand(env: Env) {
   const endDate = threeDaysAgo()
   const days = Math.max(7, Math.min(90, Number(env.GSC_SYNC_DAYS || 28)))
   const startDate = subtractDays(endDate, days - 1)
-  const siteUrl = String(env.GSC_SITE_URL)
+  const siteUrls = [...new Set(
+    String(env.GSC_SITE_URLS || env.GSC_SITE_URL || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean),
+  )]
+  const primarySite = String(env.GSC_SITE_URL || siteUrls[0] || "")
+  const results: Array<Record<string, unknown>> = []
+  const failures: Array<Record<string, unknown>> = []
 
-  const response = await fetch(
-    `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        startDate,
-        endDate,
-        dimensions: ["query", "page", "country"],
-        rowLimit: 25000,
-        dataState: "final",
-      }),
-      signal: AbortSignal.timeout(20_000),
-    },
-  )
-  const payload = await response.json().catch(() => ({})) as any
-  if (!response.ok) throw new Error(`gsc_query_failed:${response.status}`)
+  for (const siteUrl of siteUrls) {
+    const sourceSite = searchConsoleSurface(siteUrl)
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            startDate,
+            endDate,
+            dimensions: ["query", "page", "country"],
+            rowLimit: 25000,
+            dataState: "final",
+          }),
+          signal: AbortSignal.timeout(20_000),
+        },
+      )
+      const payload = await response.json().catch(() => ({})) as any
+      if (!response.ok) throw new Error(`gsc_query_failed:${response.status}`)
 
-  const aggregated = new Map<string, {
-    clicks: number
-    impressions: number
-    positionNumerator: number
-    pageWeights: Map<string, number>
-    countryWeights: Map<string, number>
-  }>()
+      const aggregated = new Map<string, {
+        clicks: number
+        impressions: number
+        positionNumerator: number
+        pageWeights: Map<string, number>
+        countryWeights: Map<string, number>
+      }>()
 
-  for (const row of payload.rows || []) {
-    const query = String(row.keys?.[0] || "").trim()
-    if (!query) continue
-    const page = String(row.keys?.[1] || "")
-    const country = String(row.keys?.[2] || "").toUpperCase()
-    const clicks = Number(row.clicks || 0)
-    const impressions = Number(row.impressions || 0)
-    const position = Number(row.position || 0)
-    const current = aggregated.get(query) || {
-      clicks: 0,
-      impressions: 0,
-      positionNumerator: 0,
-      pageWeights: new Map(),
-      countryWeights: new Map(),
-    }
-    current.clicks += clicks
-    current.impressions += impressions
-    current.positionNumerator += position * Math.max(1, impressions)
-    if (page) current.pageWeights.set(page, (current.pageWeights.get(page) || 0) + Math.max(1, impressions))
-    if (country) current.countryWeights.set(country, (current.countryWeights.get(country) || 0) + Math.max(1, impressions))
-    aggregated.set(query, current)
-  }
-
-  const top = [...aggregated.entries()]
-    .sort((a, b) => b[1].clicks - a[1].clicks || b[1].impressions - a[1].impressions)
-    .slice(0, 2000)
-
-  const now = nowIso()
-  for (const [query, value] of top) {
-    const topPage = [...value.pageWeights.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
-    const topCountry = [...value.countryWeights.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
-    let landingPath: string | null = null
-    if (topPage) {
-      try {
-        landingPath = new URL(topPage).pathname
-      } catch {
-        landingPath = topPage.slice(0, 500)
+      for (const row of payload.rows || []) {
+        const query = String(row.keys?.[0] || "").trim()
+        if (!query) continue
+        const page = String(row.keys?.[1] || "")
+        const country = String(row.keys?.[2] || "").toUpperCase()
+        const clicks = Number(row.clicks || 0)
+        const impressions = Number(row.impressions || 0)
+        const position = Number(row.position || 0)
+        const current = aggregated.get(query) || {
+          clicks: 0,
+          impressions: 0,
+          positionNumerator: 0,
+          pageWeights: new Map(),
+          countryWeights: new Map(),
+        }
+        current.clicks += clicks
+        current.impressions += impressions
+        current.positionNumerator += position * Math.max(1, impressions)
+        if (page) current.pageWeights.set(page, (current.pageWeights.get(page) || 0) + Math.max(1, impressions))
+        if (country) current.countryWeights.set(country, (current.countryWeights.get(country) || 0) + Math.max(1, impressions))
+        aggregated.set(query, current)
       }
-    }
-    const averagePosition = value.positionNumerator / Math.max(1, value.impressions)
 
-    await env.GROWTH_DB.prepare(
-      `INSERT INTO search_demand
-       (query,landing_path,clicks,impressions,average_position,country_code,source,last_seen_at,updated_at)
-       VALUES (?,?,?,?,?,?,'google_search_console',?,?)
-       ON CONFLICT(query) DO UPDATE SET
-         landing_path=excluded.landing_path,
-         clicks=excluded.clicks,
-         impressions=excluded.impressions,
-         average_position=excluded.average_position,
-         country_code=excluded.country_code,
-         source=excluded.source,
-         last_seen_at=excluded.last_seen_at,
-         updated_at=excluded.updated_at`,
-    ).bind(
-      query.slice(0, 500),
-      landingPath,
-      Math.round(value.clicks),
-      Math.round(value.impressions),
-      Number(averagePosition.toFixed(2)),
-      topCountry,
-      endDate,
-      now,
-    ).run()
+      const top = [...aggregated.entries()]
+        .sort((a, b) => b[1].clicks - a[1].clicks || b[1].impressions - a[1].impressions)
+        .slice(0, 2000)
+      const now = nowIso()
+
+      for (const [query, value] of top) {
+        const topPage = [...value.pageWeights.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
+        const topCountry = [...value.countryWeights.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
+        let landingPath: string | null = null
+        if (topPage) {
+          try { landingPath = new URL(topPage).pathname }
+          catch { landingPath = topPage.slice(0, 500) }
+        }
+        const averagePosition = value.positionNumerator / Math.max(1, value.impressions)
+
+        await env.GROWTH_DB.prepare(
+          `INSERT INTO search_demand_sites
+           (source_site,query,landing_path,clicks,impressions,average_position,country_code,last_seen_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(source_site,query) DO UPDATE SET
+            landing_path=excluded.landing_path,clicks=excluded.clicks,impressions=excluded.impressions,
+            average_position=excluded.average_position,country_code=excluded.country_code,
+            last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`,
+        ).bind(
+          sourceSite,query.slice(0,500),landingPath,Math.round(value.clicks),Math.round(value.impressions),
+          Number(averagePosition.toFixed(2)),topCountry,endDate,now,
+        ).run()
+
+        if (siteUrl === primarySite) {
+          await env.GROWTH_DB.prepare(
+            `INSERT INTO search_demand
+             (query,landing_path,clicks,impressions,average_position,country_code,source,last_seen_at,updated_at)
+             VALUES (?,?,?,?,?,?,'google_search_console',?,?)
+             ON CONFLICT(query) DO UPDATE SET
+              landing_path=excluded.landing_path,clicks=excluded.clicks,impressions=excluded.impressions,
+              average_position=excluded.average_position,country_code=excluded.country_code,
+              source=excluded.source,last_seen_at=excluded.last_seen_at,updated_at=excluded.updated_at`,
+          ).bind(
+            query.slice(0,500),landingPath,Math.round(value.clicks),Math.round(value.impressions),
+            Number(averagePosition.toFixed(2)),topCountry,endDate,now,
+          ).run()
+        }
+      }
+
+      await audit(env, "search", "gsc_sync", "site", siteUrl, {
+        source_site: sourceSite,
+        start_date: startDate,
+        end_date: endDate,
+        source_rows: (payload.rows || []).length,
+        queries_stored: top.length,
+      })
+      results.push({ source_site: sourceSite, site_url: siteUrl, synced: top.length, source_rows: (payload.rows || []).length })
+    } catch (error) {
+      const failure = {
+        source_site: sourceSite,
+        site_url: siteUrl,
+        error: error instanceof Error ? error.message : String(error),
+      }
+      failures.push(failure)
+      await audit(env, "search", "gsc_sync_failed", "site", siteUrl, failure)
+    }
   }
 
-  await audit(env, "search", "gsc_sync", "site", siteUrl, {
-    start_date: startDate,
-    end_date: endDate,
-    source_rows: (payload.rows || []).length,
-    queries_stored: top.length,
-  })
+  if (!results.length && failures.length) {
+    throw new Error(`gsc_all_properties_failed:${failures.map((x) => x.source_site).join(",")}`)
+  }
 
-  return { synced: top.length, source_rows: (payload.rows || []).length, start_date: startDate, end_date: endDate }
+  return { synced_properties: results, failures, start_date: startDate, end_date: endDate }
 }
 
 export function googleCalendarConfigured(env: Env) {
