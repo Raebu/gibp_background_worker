@@ -263,20 +263,33 @@ export async function runDeliverabilityChecks(env: Env) {
   const domain = address.split("@")[1]?.trim().toLowerCase() || "gibp.global"
 
   const checks: Array<{ kind: string; ok: boolean; detail: unknown }> = []
+
   try {
     const rootTxt = await dnsJson(domain, "TXT")
     const values = (rootTxt.Answer || []).map((x) => String(x.data || "").replaceAll('"', ""))
-    checks.push({ kind: "spf", ok: values.some((x) => /v=spf1/i.test(x)), detail: values })
+    checks.push({
+      kind: "spf_root",
+      ok: values.some((x) => /v=spf1/i.test(x)),
+      detail: values,
+    })
   } catch (error) {
-    checks.push({ kind: "spf", ok: false, detail: { error: String(error) } })
+    checks.push({ kind: "spf_root", ok: false, detail: { error: String(error) } })
   }
 
   try {
     const dmarc = await dnsJson(`_dmarc.${domain}`, "TXT")
     const values = (dmarc.Answer || []).map((x) => String(x.data || "").replaceAll('"', ""))
-    checks.push({ kind: "dmarc", ok: values.some((x) => /v=DMARC1/i.test(x)), detail: values })
+    const policy = values.find((x) => /v=DMARC1/i.test(x)) || ""
+    const mode = policy.match(/(?:^|;)\s*p=([^;\s]+)/i)?.[1]?.toLowerCase() || null
+    checks.push({ kind: "dmarc", ok: Boolean(policy), detail: { values, policy: mode } })
+    checks.push({
+      kind: "dmarc_policy",
+      ok: mode === "quarantine" || mode === "reject",
+      detail: { policy: mode, recommended: "quarantine_or_reject" },
+    })
   } catch (error) {
     checks.push({ kind: "dmarc", ok: false, detail: { error: String(error) } })
+    checks.push({ kind: "dmarc_policy", ok: false, detail: { error: String(error) } })
   }
 
   try {
@@ -285,6 +298,100 @@ export async function runDeliverabilityChecks(env: Env) {
     checks.push({ kind: "mx", ok: values.length > 0, detail: values })
   } catch (error) {
     checks.push({ kind: "mx", ok: false, detail: { error: String(error) } })
+  }
+
+  if (env.RESEND_API_KEY) {
+    try {
+      const response = await fetch("https://api.resend.com/domains?limit=100", {
+        headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
+        signal: AbortSignal.timeout(15_000),
+      })
+      const payload = await response.json().catch(() => ({})) as any
+      if (!response.ok) throw new Error(`resend_domains_${response.status}`)
+
+      const resendDomain = (payload.data || []).find(
+        (item: any) => String(item.name || "").toLowerCase() === domain,
+      )
+      const verified = resendDomain?.status === "verified"
+      const sendingEnabled =
+        !resendDomain?.capabilities ||
+        resendDomain.capabilities.sending === "enabled"
+
+      checks.push({
+        kind: "resend_domain",
+        ok: Boolean(resendDomain && verified && sendingEnabled),
+        detail: {
+          id: resendDomain?.id || null,
+          status: resendDomain?.status || null,
+          capabilities: resendDomain?.capabilities || null,
+        },
+      })
+
+      let records: any[] = Array.isArray(resendDomain?.records) ? resendDomain.records : []
+      if (resendDomain?.id && !records.length) {
+        const detailResponse = await fetch(
+          `https://api.resend.com/domains/${encodeURIComponent(String(resendDomain.id))}`,
+          {
+            headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` },
+            signal: AbortSignal.timeout(15_000),
+          },
+        )
+        const detailPayload = await detailResponse.json().catch(() => ({})) as any
+        if (detailResponse.ok && Array.isArray(detailPayload.records)) records = detailPayload.records
+      }
+
+      const dkimRecords = records.filter((r: any) => String(r.record || "").toUpperCase() === "DKIM")
+      const spfRecords = records.filter((r: any) => String(r.record || "").toUpperCase() === "SPF")
+      const dkimOk = dkimRecords.length > 0 && dkimRecords.every(
+        (r: any) => String(r.status || "").toLowerCase() === "verified",
+      )
+      const spfOk = spfRecords.length > 0 && spfRecords.every(
+        (r: any) => String(r.status || "").toLowerCase() === "verified",
+      )
+
+      checks.push({
+        kind: "dkim",
+        ok: dkimOk,
+        detail: dkimRecords.map((r: any) => ({
+          name: r.name || null,
+          type: r.type || null,
+          status: r.status || null,
+        })),
+      })
+      checks.push({
+        kind: "resend_spf",
+        ok: spfOk,
+        detail: spfRecords.map((r: any) => ({
+          name: r.name || null,
+          type: r.type || null,
+          status: r.status || null,
+        })),
+      })
+
+      const aligned =
+        Boolean(resendDomain && String(resendDomain.name || "").toLowerCase() === domain) &&
+        (dkimOk || spfOk)
+      checks.push({
+        kind: "dmarc_alignment",
+        ok: aligned,
+        detail: {
+          from_domain: domain,
+          resend_domain: resendDomain?.name || null,
+          dkim_verified: dkimOk,
+          spf_verified: spfOk,
+        },
+      })
+    } catch (error) {
+      for (const kind of ["resend_domain","dkim","resend_spf","dmarc_alignment"]) {
+        checks.push({ kind, ok: false, detail: { error: String(error) } })
+      }
+    }
+  } else {
+    checks.push({
+      kind: "resend_domain",
+      ok: false,
+      detail: { error: "resend_api_key_not_configured" },
+    })
   }
 
   for (const check of checks) {
@@ -304,11 +411,16 @@ export async function runDeliverabilityChecks(env: Env) {
 
   const failed = checks.filter((x) => !x.ok)
   if (failed.length) {
+    const criticalKinds = new Set(["resend_domain","dkim","dmarc_alignment"])
     await recordOperationsAlert(env, {
       fingerprint: `deliverability:${domain}`,
-      severity: "warning",
+      severity: failed.some((x) => criticalKinds.has(x.kind)) ? "critical" : "warning",
       kind: "deliverability_degraded",
-      detail: { domain, failed: failed.map((x) => x.kind) },
+      detail: {
+        domain,
+        failed: failed.map((x) => x.kind),
+        checks,
+      },
     })
   } else {
     await resolveOperationsAlert(env, `deliverability:${domain}`)
@@ -505,7 +617,7 @@ export async function operationsSnapshot(env: Env) {
     `SELECT check_kind,status,checked_at
      FROM deliverability_checks
      WHERE checked_at >= datetime('now','-2 day')
-     ORDER BY checked_at DESC LIMIT 6`,
+     ORDER BY checked_at DESC LIMIT 16`,
   ).all<any>()
   return {
     pause: await outboundPauseState(env),
