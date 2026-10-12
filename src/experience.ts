@@ -4,6 +4,9 @@ import { readIntentToken } from "./security"
 import { requestMeetingBooking } from "./lifecycle"
 import { readMeetingToken, scheduleNativeGoogleMeeting } from "./google"
 import { operationsSnapshot, recordConversionAttribution } from "./operations"
+import { funnelSnapshot, heartbeatHealth } from "./assurance"
+import { crmSnapshot } from "./crm"
+import { experimentSnapshot } from "./experiments"
 
 function esc(value: unknown) {
   return String(value ?? "")
@@ -435,6 +438,30 @@ export async function renderDashboard(env: Env) {
      LEFT JOIN accounts a ON a.id=ca.account_id
      ORDER BY ca.occurred_at DESC LIMIT 12`,
   ).all<any>()
+  const heartbeats = await heartbeatHealth(env)
+  const funnel = await funnelSnapshot(env)
+  const experiments = await experimentSnapshot(env)
+  const crm = await crmSnapshot(env)
+  const quality = await env.GROWTH_DB.prepare(
+    `SELECT
+      COUNT(*) AS scored,
+      SUM(CASE WHEN score>=90 THEN 1 ELSE 0 END) AS excellent,
+      SUM(CASE WHEN score>=75 AND score<90 THEN 1 ELSE 0 END) AS sendable,
+      SUM(CASE WHEN score<75 THEN 1 ELSE 0 END) AS blocked,
+      ROUND(AVG(score),1) AS average_score
+     FROM contact_data_quality`,
+  ).first<any>()
+  const governance = await env.GROWTH_DB.prepare(
+    `SELECT a.id,a.name,a.domain,g.never_contact,g.manual_review_required,
+            g.manual_review_approved_at,g.vip,g.strategic_account,g.owner,g.notes
+     FROM account_governance g JOIN accounts a ON a.id=g.account_id
+     ORDER BY g.vip DESC,g.strategic_account DESC,a.name LIMIT 20`,
+  ).all<any>()
+  const blackouts = await env.GROWTH_DB.prepare(
+    `SELECT country_code,date,name,source,manual
+     FROM sending_blackouts WHERE date>=date('now')
+     ORDER BY date,country_code LIMIT 20`,
+  ).all<any>()
 
   const cards = Object.entries(metrics || {}).map(([k,v]) =>
     `<div class="card"><div class="tag">${esc(k.replaceAll("_"," "))}</div><div class="score" style="font-size:46px">${esc(v)}</div></div>`
@@ -465,7 +492,57 @@ export async function renderDashboard(env: Env) {
        </form>
        <p class="muted">Pause affects outbound only. Inbound replies, unsubscribe/suppression processing, discovery, research, verification and reporting continue.</p>
      </section>
+     <div class="grid">
+       <section class="card"><h2>Job heartbeat SLA</h2>
+         <div class="score" style="font-size:38px">${esc(heartbeats.total - heartbeats.stale.length)}/${esc(heartbeats.total)}</div>
+         <p>Healthy scheduled jobs. Stale: ${esc(heartbeats.stale.length)} · failing: ${esc(heartbeats.failing.length)}</p>
+         ${heartbeats.stale.slice(0,8).map((x:any)=>`<div class="signal"><strong>${esc(x.job_kind)}</strong><div class="muted">Last success ${esc(x.last_success_at || "never")}</div></div>`).join("")}
+       </section>
+       <section class="card"><h2>Contact data quality</h2>
+         <div class="score" style="font-size:38px">${esc(quality?.average_score ?? "—")}</div>
+         <p>Average confidence score. Excellent ≥90: ${esc(quality?.excellent || 0)} · sendable 75–89: ${esc(quality?.sendable || 0)} · blocked &lt;75: ${esc(quality?.blocked || 0)}</p>
+       </section>
+       <section class="card"><h2>CRM synchronisation</h2>
+         <div class="score" style="font-size:30px">${esc(crm.configured ? (crm.provider || "configured") : "off")}</div>
+         ${crm.rows.map((x:any)=>`<div class="signal"><strong>${esc(x.entity_type)} · ${esc(x.status)}</strong><div>${esc(x.total)} records</div><div class="muted">${esc(x.last_synced_at || "")}</div></div>`).join("") || "<p>Configure a CRM provider to start bidirectional sync.</p>"}
+       </section>
+     </div>
      <div class="grid">${cards}</div>
+     <section class="card"><h2>Commercial funnel</h2>
+       <div class="grid">
+         ${Object.entries(funnel.totals || {}).map(([k,v])=>`<div><div class="tag">${esc(k.replaceAll("_"," "))}</div><div class="score" style="font-size:30px">${esc(v)}</div></div>`).join("")}
+       </div>
+       <h3 style="margin-top:22px">By source</h3>
+       ${funnel.by_source.slice(0,10).map((x:any)=>`<div class="signal"><strong>${esc(x.dimension)}</strong><div>${esc(x.conversations)} conversations · ${esc(x.replies)} replies · ${esc(x.won)} won</div></div>`).join("") || "<p>No funnel data yet.</p>"}
+     </section>
+     <section class="card"><h2>Controlled experiments</h2>
+       ${experiments.stats.map((x:any)=>`<div class="signal"><strong>${esc(x.name)} · ${esc(x.variant_key)}</strong><div>${esc(x.samples)} samples · ${esc(x.positive)} positive · ${esc(x.meetings)} meetings · ${esc(x.won)} won</div><div class="muted">Status: ${esc(x.status)}</div></div>`).join("") || "<p>No experiments have data yet.</p>"}
+     </section>
+     <div class="grid">
+       <section class="card"><h2>Account governance</h2>
+         <form method="post" action="/dashboard/governance">
+           <label>Account ID</label><input name="account_id" required placeholder="Account UUID">
+           <label><input style="width:auto" type="checkbox" name="never_contact" value="1"> Never contact</label>
+           <label><input style="width:auto" type="checkbox" name="manual_review_required" value="1"> Manual review required</label>
+           <label><input style="width:auto" type="checkbox" name="vip" value="1"> VIP</label>
+           <label><input style="width:auto" type="checkbox" name="strategic_account" value="1"> Strategic account</label>
+           <label>Owner</label><input name="owner" placeholder="Named account owner">
+           <label>Notes</label><textarea name="notes"></textarea>
+           <label><input style="width:auto" type="checkbox" name="approve" value="1"> Approve outreach now</label>
+           <p><button type="submit">Save governance</button></p>
+         </form>
+         ${(governance.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.name)}</strong><div>${x.never_contact?"never contact · ":""}${x.vip?"VIP · ":""}${x.strategic_account?"strategic · ":""}${x.manual_review_required?"manual review":""}</div><div class="muted">${esc(x.owner || "Unowned")} · ${esc(x.id)}</div></div>`).join("") || "<p>No account-specific governance overrides.</p>"}
+       </section>
+       <section class="card"><h2>Sending calendar</h2>
+         <form method="post" action="/dashboard/blackout">
+           <label>Country code</label><input name="country_code" maxlength="2" required placeholder="GB">
+           <label>Date</label><input name="date" type="date" required>
+           <label>Reason</label><input name="name" required placeholder="Company blackout / public holiday">
+           <p><button type="submit">Add blackout</button></p>
+         </form>
+         ${(blackouts.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.date)} · ${esc(x.country_code)}</strong><div>${esc(x.name)}</div><div class="muted">${esc(x.source)}</div></div>`).join("") || "<p>No upcoming blackout dates cached yet.</p>"}
+       </section>
+     </div>
      <section class="card"><h2>Serious opportunities</h2><table><thead><tr><th>Account</th><th>Contact</th><th>Priority</th><th>Reason</th></tr></thead><tbody>
      ${(handoffs.results||[]).map((x:any)=>`<tr><td>${esc(x.account_name)}</td><td>${esc(x.contact_name)}<br><span class="muted">${esc(x.role)}</span></td><td>${esc(x.priority)}</td><td>${esc(x.reason)}</td></tr>`).join("") || '<tr><td colspan="4">No serious handoffs yet.</td></tr>'}
      </tbody></table></section>
