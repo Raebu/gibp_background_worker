@@ -31,6 +31,8 @@ import {
   evaluateReputationAndSafety,
   markOutboundDispatchFailed,
   markOutboundDispatchSent,
+  markWebhookFailed,
+  markWebhookProcessed,
   maybeSendDailyCommercialReport,
   operationsSnapshot,
   outboundPauseState,
@@ -1131,12 +1133,7 @@ export async function handleInboundEmail(env: Env, emailId: string) {
   return { matched: true, classification }
 }
 
-export async function handleResendEvent(env: Env, event: any) {
-  const receipt = await claimWebhookEvent(env, event)
-  if (!receipt.claimed) {
-    return { handled: true, duplicate: true, event_key: receipt.event_key }
-  }
-
+async function processResendEventCore(env: Env, event: any) {
   const type = String(event?.type || "")
   const data = event?.data || {}
 
@@ -1219,6 +1216,23 @@ export async function handleResendEvent(env: Env, event: any) {
       .run()
   }
   return { handled: true }
+}
+
+
+export async function handleResendEvent(env: Env, event: any) {
+  const receipt = await claimWebhookEvent(env, event)
+  if (!receipt.claimed) {
+    return { handled: true, duplicate: true, event_key: receipt.event_key }
+  }
+
+  try {
+    const result = await processResendEventCore(env, event)
+    await markWebhookProcessed(env, receipt.event_key)
+    return result
+  } catch (error) {
+    await markWebhookFailed(env, receipt.event_key, error)
+    throw error
+  }
 }
 
 export async function recordWebsiteIntent(
