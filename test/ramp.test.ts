@@ -13,7 +13,18 @@ describe("sender reputation ramp", () => {
     ).toBe(5)
   })
 
-  it("ramps gradually when quality is healthy", () => {
+  it("still holds at twenty healthy sends", () => {
+    expect(
+      computeNextRampCap(
+        { initialSent: 20, inboundReplies: 5, positiveReplies: 4, bounces: 0, complaints: 0 },
+        5,
+        5,
+        20,
+      ),
+    ).toBe(5)
+  })
+
+  it("ramps gradually only after fifty healthy sends", () => {
     expect(
       computeNextRampCap(
         { initialSent: 50, inboundReplies: 8, positiveReplies: 4, bounces: 0, complaints: 0 },
