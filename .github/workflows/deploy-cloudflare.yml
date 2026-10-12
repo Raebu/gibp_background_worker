@@ -1275,7 +1275,7 @@ jobs:
 
 
       # Zero-credit proof: uses only existing compliance/QEV-eligible contacts and never calls Apollo enrichment.
-      - name: Prove personalised outreach simulation without live sending
+      - name: Prove personalised outreach simulation across distinct accounts without live sending
         shell: bash
         run: |
           set -euo pipefail
@@ -1286,6 +1286,12 @@ jobs:
           if (config.vars.SEND_MODE !== "dry_run") throw new Error("Simulation commissioning requires SEND_MODE=dry_run")
           NODE
 
+          query_scalar() {
+            local sql="$1"
+            npx wrangler d1 execute GROWTH_DB --remote --json --command "$sql" \
+              | jq '[.. | objects | .total? | numbers] | max // 0'
+          }
+
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues" \
@@ -1294,15 +1300,8 @@ jobs:
           QUEUE_ID="$(jq -r '.result[] | select(.queue_name=="gibp-growth-jobs") | .queue_id' /tmp/outreach-simulation-queues.json | head -1)"
           test -n "$QUEUE_ID"
 
-          BEFORE_JOB="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-            --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='outreach_simulation_commissioning';" \
-            | jq '[.. | objects | .total? | numbers] | max // 0')"
-          BEFORE_SIM="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-            --command "SELECT COUNT(*) AS total FROM messages WHERE direction='simulation';" \
-            | jq '[.. | objects | .total? | numbers] | max // 0')"
-          BEFORE_OUT="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-            --command "SELECT COUNT(*) AS total FROM messages WHERE direction='outbound';" \
-            | jq '[.. | objects | .total? | numbers] | max // 0')"
+          BEFORE_JOB="$(query_scalar "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='outreach_simulation_commissioning';")"
+          BEFORE_OUT="$(query_scalar "SELECT COUNT(*) AS total FROM messages WHERE direction='outbound';")"
 
           curl --fail --silent --show-error \
             -X POST \
@@ -1315,9 +1314,7 @@ jobs:
           jq -e '.success == true' /tmp/outreach-simulation-publish.json >/dev/null
 
           for attempt in $(seq 1 24); do
-            AFTER_JOB="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-              --command "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='outreach_simulation_commissioning';" \
-              | jq '[.. | objects | .total? | numbers] | max // 0')"
+            AFTER_JOB="$(query_scalar "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='outreach_simulation_commissioning';")"
             if [ "$AFTER_JOB" -gt "$BEFORE_JOB" ]; then
               break
             fi
@@ -1326,23 +1323,17 @@ jobs:
 
           test "$AFTER_JOB" -gt "$BEFORE_JOB"
 
-          AFTER_SIM="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-            --command "SELECT COUNT(*) AS total FROM messages WHERE direction='simulation';" \
-            | jq '[.. | objects | .total? | numbers] | max // 0')"
-          AFTER_OUT="$(npx wrangler d1 execute GROWTH_DB --remote --json \
-            --command "SELECT COUNT(*) AS total FROM messages WHERE direction='outbound';" \
-            | jq '[.. | objects | .total? | numbers] | max // 0')"
+          AFTER_OUT="$(query_scalar "SELECT COUNT(*) AS total FROM messages WHERE direction='outbound';")"
+          DISTINCT_ACCOUNTS="$(query_scalar "SELECT COUNT(DISTINCT json_extract(detail_json,'$.account_id')) AS total FROM audit_events WHERE category='engine' AND action='outreach_simulation_commissioned' AND json_extract(detail_json,'$.account_id') IS NOT NULL;")"
+          DISTINCT_ROLES="$(query_scalar "SELECT COUNT(DISTINCT json_extract(detail_json,'$.contact_role')) AS total FROM audit_events WHERE category='engine' AND action='outreach_simulation_commissioned' AND json_extract(detail_json,'$.contact_role') IS NOT NULL AND length(trim(json_extract(detail_json,'$.contact_role'))) > 0;")"
 
-          if [ "$AFTER_SIM" -le "$BEFORE_SIM" ]; then
-            echo "Commissioning did not generate a personalised simulation."
-            npx wrangler d1 execute GROWTH_DB --remote --json --command "
-              SELECT detail_json,created_at
-              FROM audit_events
-              WHERE category='engine'
-                AND action='queue_job_complete'
-                AND entity_id='outreach_simulation_commissioning'
-              ORDER BY created_at DESC LIMIT 1;
-            "
+          if [ "$DISTINCT_ACCOUNTS" -lt 3 ]; then
+            echo "Commissioning has not proven personalised simulations across three distinct accounts."
+            exit 1
+          fi
+
+          if [ "$DISTINCT_ROLES" -lt 2 ]; then
+            echo "Commissioning has not proven role diversity across at least two named roles."
             exit 1
           fi
 
@@ -1352,12 +1343,26 @@ jobs:
           fi
 
           npx wrangler d1 execute GROWTH_DB --remote --json --command "
-            SELECT m.id,m.conversation_id,m.subject,m.classification,m.metadata_json,m.created_at
-            FROM messages m
-            WHERE m.direction='simulation'
-            ORDER BY m.created_at DESC
-            LIMIT 1;
-          " | tee /tmp/outreach-simulation-proof.json
+            SELECT
+              a.name AS account_name,
+              json_extract(ae.detail_json,'$.contact_role') AS contact_role,
+              json_extract(ae.detail_json,'$.classification') AS classification,
+              ae.created_at
+            FROM audit_events ae
+            JOIN accounts a ON a.id=json_extract(ae.detail_json,'$.account_id')
+            WHERE ae.category='engine'
+              AND ae.action='outreach_simulation_commissioned'
+            ORDER BY ae.created_at DESC
+            LIMIT 6;
+          " | tee /tmp/outreach-simulation-diversity-proof.json
+
+          npx wrangler d1 execute GROWTH_DB --remote --json --command "
+            SELECT
+              $DISTINCT_ACCOUNTS AS distinct_accounts,
+              $DISTINCT_ROLES AS distinct_roles,
+              (SELECT COUNT(*) FROM messages WHERE direction='simulation') AS simulations,
+              $AFTER_OUT AS real_outbound;
+          " | tee /tmp/outreach-simulation-diversity-metrics.json
 
       - name: Verify website intent ingestion
         shell: bash

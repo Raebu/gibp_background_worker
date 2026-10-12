@@ -90,3 +90,18 @@ describe("outreach simulation commissioning safety", () => {
     expect(indexSource.slice(scheduledStart, queueStart)).not.toContain("outreach_simulation_commissioning")
   })
 })
+
+
+describe("outreach simulation diversity commissioning", () => {
+  it("requires distinct accounts and named roles while remaining dry-run only", () => {
+    const engine = fs.readFileSync("src/engine.ts", "utf8")
+    const workflow = fs.readFileSync(".github/workflows/deploy-cloudflare.yml", "utf8")
+    expect(engine).toContain("targetDistinctAccounts = 3")
+    expect(engine).toContain("ct.role IS NOT NULL")
+    expect(engine).toContain("commissionedAccounts.has(conversation.account_id)")
+    expect(engine).toContain('throw new Error("Commissioning simulation attempted a live send")')
+    expect(workflow).toContain("DISTINCT_ACCOUNTS")
+    expect(workflow).toContain("DISTINCT_ROLES")
+    expect(workflow).toContain('if [ "$AFTER_OUT" -ne "$BEFORE_OUT" ]')
+  })
+})
