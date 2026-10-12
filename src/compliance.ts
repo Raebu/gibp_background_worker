@@ -1,6 +1,7 @@
 import type { Account, Contact, Env } from "./types"
 import { countToday } from "./db"
 import { currentNewOutreachCap } from "./ramp"
+import { outboundPauseState } from "./operations"
 
 const genericMailboxPattern =
   /^(info|contact|hello|enquiries?|inquiries?|support|sales|commercial|office|admin|marketing|press|media|privacy|security|abuse|help|customerservice|customer\.service|partnerships?|alliances?|procurement|supplier|vendors?)\d*$/i
@@ -31,6 +32,8 @@ export async function canSendTo(
   contact: Contact,
   isInitial: boolean,
 ): Promise<ComplianceDecision> {
+  const pause = await outboundPauseState(env)
+  if (pause.paused) return { allowed: false, reason: `outbound_paused:${pause.reason || "operations"}` }
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
   if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }
   if (isGenericRoleAddress(contact.email)) return { allowed: false, reason: "generic_role_address_blocked" }
