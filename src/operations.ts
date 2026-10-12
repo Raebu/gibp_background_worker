@@ -584,12 +584,23 @@ export async function recordConversionAttribution(
     currency?: string | null
     metadata?: unknown
     occurredAt?: string
+    sourceSite?: string | null
   },
 ) {
+  let sourceSite = input.sourceSite || null
+  if (!sourceSite && input.conversationId) {
+    const recent = await env.GROWTH_DB.prepare(
+      `SELECT source_site FROM website_intent
+       WHERE conversation_id=? AND source_site IN ('gibp.global','gibp.app')
+       ORDER BY created_at DESC LIMIT 1`,
+    ).bind(input.conversationId).first<{ source_site: string }>()
+    sourceSite = recent?.source_site || null
+  }
+
   await env.GROWTH_DB.prepare(
     `INSERT OR IGNORE INTO conversion_attribution
-      (id,source_key,conversation_id,account_id,stage,source,value,currency,metadata_json,occurred_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      (id,source_key,conversation_id,account_id,stage,source,value,currency,metadata_json,occurred_at,source_site)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     id(),
     input.sourceKey,
@@ -601,6 +612,7 @@ export async function recordConversionAttribution(
     input.currency || null,
     JSON.stringify(input.metadata || {}),
     input.occurredAt || nowIso(),
+    sourceSite,
   ).run()
 }
 
