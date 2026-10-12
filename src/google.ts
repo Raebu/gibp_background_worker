@@ -1,5 +1,6 @@
 import type { Env } from "./types"
 import { audit, nowIso } from "./db"
+import { recordConversionAttribution } from "./operations"
 
 type BusyWindow = { start: string; end: string }
 type MeetingSlot = { start: string; end: string; timezone: string; label: string }
