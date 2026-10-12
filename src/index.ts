@@ -571,6 +571,59 @@ export default {
       })
     }
 
+    if (url.pathname === "/dashboard/governance" && request.method === "POST") {
+      if (!isAuthorized(request, env)) return unauthorized()
+      const form = await request.formData()
+      const accountId = String(form.get("account_id") || "").trim()
+      if (!accountId) return json({ error: "account_id_required" }, 400)
+      const exists = await env.GROWTH_DB.prepare("SELECT id FROM accounts WHERE id=?").bind(accountId).first()
+      if (!exists) return json({ error: "account_not_found" }, 404)
+      await env.GROWTH_DB.prepare(
+        `INSERT INTO account_governance
+          (account_id,never_contact,manual_review_required,manual_review_approved_at,
+           vip,strategic_account,owner,notes,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(account_id) DO UPDATE SET
+          never_contact=excluded.never_contact,
+          manual_review_required=excluded.manual_review_required,
+          manual_review_approved_at=excluded.manual_review_approved_at,
+          vip=excluded.vip,strategic_account=excluded.strategic_account,
+          owner=excluded.owner,notes=excluded.notes,updated_at=excluded.updated_at`,
+      ).bind(
+        accountId,
+        form.get("never_contact") ? 1 : 0,
+        form.get("manual_review_required") ? 1 : 0,
+        form.get("approve") ? nowIso() : null,
+        form.get("vip") ? 1 : 0,
+        form.get("strategic_account") ? 1 : 0,
+        String(form.get("owner") || "").trim().slice(0,200) || null,
+        String(form.get("notes") || "").trim().slice(0,2000) || null,
+        nowIso(),
+      ).run()
+      return new Response(null, {
+        status: 303,
+        headers: { Location: "/dashboard", "Cache-Control": "no-store" },
+      })
+    }
+
+    if (url.pathname === "/dashboard/blackout" && request.method === "POST") {
+      if (!isAuthorized(request, env)) return unauthorized()
+      const form = await request.formData()
+      try {
+        await upsertSendingBlackout(env, {
+          country_code: String(form.get("country_code") || ""),
+          date: String(form.get("date") || ""),
+          name: String(form.get("name") || ""),
+        })
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "invalid_blackout" }, 400)
+      }
+      return new Response(null, {
+        status: 303,
+        headers: { Location: "/dashboard", "Cache-Control": "no-store" },
+      })
+    }
+
     if (url.pathname === "/dashboard" && request.method === "GET") {
       return isAuthorized(request, env) ? renderDashboard(env) : renderDashboardLogin()
     }
