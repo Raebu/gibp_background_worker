@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { apolloEnrichmentDailyCap, scoreApolloCandidateTitle } from "../src/apollo"
 
@@ -45,5 +46,16 @@ describe("Apollo paid-enrichment account cooldown", () => {
   it("documents the 30-day account-level spend guard in the selector", async () => {
     const source = await import("../src/apollo")
     expect(source.enrichTopApolloCandidate).toBeTypeOf("function")
+  })
+})
+
+
+describe("Apollo contact persistence", () => {
+  it("does not rely on SQLite UPSERT conflict matching for lower(email)", () => {
+    const source = readFileSync("src/apollo.ts", "utf8")
+    expect(source).toContain("SELECT id FROM contacts WHERE lower(email)=lower(?) LIMIT 1")
+    expect(source).toContain("UPDATE contacts")
+    expect(source).toContain("INSERT INTO contacts")
+    expect(source).not.toContain("third_party_professional_data_review_required','research_only',?,?)\n       ON CONFLICT DO UPDATE SET")
   })
 })
