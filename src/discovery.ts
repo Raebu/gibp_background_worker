@@ -1182,6 +1182,8 @@ export async function crawlPublicContacts(
                  is_public=1,
                  verified=1,
                  seniority_score=MAX(seniority_score,?),
+                 identity_verified_at=?,
+                 role_verified_at=?,
                  updated_at=?
              WHERE id=?`,
           ).bind(
@@ -1190,15 +1192,18 @@ export async function crawlPublicContacts(
             response.url,
             score,
             now,
+            now,
+            now,
             existing.id,
           ).run()
         } else {
           await env.GROWTH_DB.prepare(
             `INSERT INTO contacts
               (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
-               seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+               seniority_score,consent_status,lawful_basis,status,created_at,updated_at,
+               identity_verified_at,role_verified_at)
              VALUES (?, ?, ?, ?, ?, 'official_named_public', ?, ?, 1, 1, ?, 'unknown',
-               'corporate_b2b_public_professional', 'active', ?, ?)`,
+               'corporate_b2b_public_professional', 'active', ?, ?, ?, ?)`,
           )
             .bind(
               id(),
@@ -1209,6 +1214,8 @@ export async function crawlPublicContacts(
               response.url,
               countryCode,
               score,
+              now,
+              now,
               now,
               now,
             )
