@@ -2,6 +2,7 @@ import type { Account, Contact, Env } from "./types"
 import { countToday } from "./db"
 import { currentNewOutreachCap } from "./ramp"
 import { outboundPauseState } from "./operations"
+import { accountGovernanceDecision, assessContactQuality } from "./assurance"
 
 const genericMailboxPattern =
   /^(info|contact|hello|enquiries?|inquiries?|support|sales|commercial|office|admin|marketing|press|media|privacy|security|abuse|help|customerservice|customer\.service|partnerships?|alliances?|procurement|supplier|vendors?)\d*$/i
@@ -34,6 +35,10 @@ export async function canSendTo(
 ): Promise<ComplianceDecision> {
   const pause = await outboundPauseState(env)
   if (pause.paused) return { allowed: false, reason: `outbound_paused:${pause.reason || "operations"}` }
+
+  const governance = await accountGovernanceDecision(env, account.id)
+  if (!governance.allowed) return { allowed: false, reason: governance.reason }
+
   if (contact.status !== "active") return { allowed: false, reason: "contact_inactive" }
   if (!contact.name?.trim()) return { allowed: false, reason: "named_decision_maker_required" }
   if (isGenericRoleAddress(contact.email)) return { allowed: false, reason: "generic_role_address_blocked" }
@@ -139,6 +144,14 @@ export async function canSendTo(
     (!env.BUSINESS_POSTAL_ADDRESS || !env.UNSUBSCRIBE_SECRET)
   ) {
     return { allowed: false, reason: "sender_compliance_configuration_incomplete" }
+  }
+
+  const quality = await assessContactQuality(env, contact, account)
+  if (quality.reasons.includes("identity_stale") || quality.reasons.includes("role_stale")) {
+    return { allowed: false, reason: "contact_data_stale" }
+  }
+  if (quality.score < quality.minimum) {
+    return { allowed: false, reason: `contact_quality_below_threshold:${quality.score}` }
   }
 
   const dailyCap = Number(env.DAILY_SEND_CAP || 50)
