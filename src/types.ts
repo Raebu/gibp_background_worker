@@ -32,6 +32,9 @@ export interface Env {
   RETENTION_DAYS?: string
   DAILY_REPORT_HOUR_UTC?: string
   RELEASE_SHA?: string
+  CONTACT_FRESHNESS_DAYS?: string
+  QUALITY_MIN_SCORE?: string
+  CRM_PROVIDER?: string
 
   RESEND_API_KEY?: string
   RESEND_WEBHOOK_SECRET?: string
@@ -51,6 +54,11 @@ export interface Env {
   MEETING_BOOKING_WEBHOOK_URL?: string
   MEETING_BOOKING_SECRET?: string
   BOOKING_URL?: string
+  CRM_WEBHOOK_URL?: string
+  CRM_WEBHOOK_SECRET?: string
+  HUBSPOT_PRIVATE_APP_TOKEN?: string
+  SALESFORCE_INSTANCE_URL?: string
+  SALESFORCE_ACCESS_TOKEN?: string
 
   GSC_GOOGLE_CLIENT_ID?: string
   GSC_GOOGLE_CLIENT_SECRET?: string
@@ -91,7 +99,7 @@ export interface Account {
 }
 
 export interface GrowthJob {
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "outreach_simulation_commissioning" | "authority" | "search_demand" | "learning" | "maintenance"
+  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "outreach_simulation_commissioning" | "authority" | "search_demand" | "learning" | "crm_sync" | "maintenance"
 }
 
 export interface Contact {
@@ -113,6 +121,8 @@ export interface Contact {
   last_contact_at: string | null
   created_at: string
   updated_at: string
+  identity_verified_at?: string | null
+  role_verified_at?: string | null
 }
 
 export interface Conversation {
