@@ -136,11 +136,13 @@ jobs:
                 'surface_experiment_assignments',
                 'surface_experiment_events',
                 'synthetic_journey_checks',
-                'site_daily_metrics'
+                'site_daily_metrics',
+                'product_user_lifecycle',
+                'product_user_signals'
               );
           " | jq '[.. | objects | .total? | numbers] | max // 0')"
-          test "$SURFACE_TABLE_COUNT" -eq 9
-          echo "Multi-surface lifecycle schema verified: $SURFACE_TABLE_COUNT/9 tables."
+          test "$SURFACE_TABLE_COUNT" -eq 11
+          echo "Multi-surface lifecycle schema verified: $SURFACE_TABLE_COUNT/11 tables."
 
           for table in website_intent conversion_requests meeting_requests conversion_attribution; do
             COLUMN_COUNT="$(npx wrangler d1 execute GROWTH_DB --remote --json --command "
