@@ -198,15 +198,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for attempt in $(seq 1 24); do
             if curl --fail --silent --show-error \
               --connect-timeout 8 --max-time 20 \
-              "https://growth.gibp.global/health" | tee /tmp/rescue-health.json; then
-              grep -q '"ok":true' /tmp/rescue-health.json
-              grep -q '"mode":"live"' /tmp/rescue-health.json
-              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/rescue-health.json
-              echo "Exact production SHA verified: $GITHUB_SHA"
-              exit 0
+              "https://growth.gibp.global/health" -o /tmp/rescue-health.json; then
+              cat /tmp/rescue-health.json
+              if jq -e --arg sha "$GITHUB_SHA" \
+                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                /tmp/rescue-health.json >/dev/null; then
+                echo "Exact production SHA verified: $GITHUB_SHA"
+                exit 0
+              fi
+              OBSERVED_SHA="$(jq -r '.release_sha // "missing"' /tmp/rescue-health.json 2>/dev/null || echo invalid_json)"
+              echo "Production is healthy but still serving release $OBSERVED_SHA; propagation attempt $attempt/24."
+            else
+              echo "Health request failed on propagation attempt $attempt/24."
             fi
             sleep 5
           done
