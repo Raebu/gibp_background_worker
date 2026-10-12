@@ -14,6 +14,9 @@ import {
   handleMeetingBookingSelection,
 } from "./experience"
 import { recordCommercialOutcome } from "./learning"
+import { crmSnapshot, ingestCrmEvent } from "./crm"
+import { experimentSnapshot } from "./experiments"
+import { funnelSnapshot, heartbeatHealth, upsertSendingBlackout } from "./assurance"
 import {
   operationsSnapshot,
   recordDeadLetter,
@@ -197,6 +200,100 @@ async function handleAdmin(request: Request, env: Env, path: string) {
     }
   }
 
+  if (path === "/admin/governance" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      `SELECT a.id AS account_id,a.name,a.domain,a.country_code,
+              COALESCE(g.never_contact,0) AS never_contact,
+              COALESCE(g.manual_review_required,0) AS manual_review_required,
+              g.manual_review_approved_at,
+              COALESCE(g.vip,0) AS vip,
+              COALESCE(g.strategic_account,0) AS strategic_account,
+              g.owner,g.notes,g.updated_at
+       FROM accounts a
+       LEFT JOIN account_governance g ON g.account_id=a.id
+       WHERE g.account_id IS NOT NULL
+          OR g.never_contact=1 OR g.manual_review_required=1 OR g.vip=1 OR g.strategic_account=1
+       ORDER BY g.vip DESC,g.strategic_account DESC,a.name
+       LIMIT 500`,
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/governance" && request.method === "POST") {
+    const body = (await bodyJson(request)) as any
+    const accountId = String(body?.account_id || "").trim()
+    if (!accountId) return json({ error: "account_id_required" }, 400)
+    const account = await env.GROWTH_DB.prepare("SELECT id FROM accounts WHERE id=?").bind(accountId).first()
+    if (!account) return json({ error: "account_not_found" }, 404)
+
+    const current = await env.GROWTH_DB.prepare(
+      "SELECT * FROM account_governance WHERE account_id=?",
+    ).bind(accountId).first<any>()
+    const approvedAt =
+      body.approve === true ? nowIso() :
+      body.approve === false ? null :
+      current?.manual_review_approved_at || null
+
+    await env.GROWTH_DB.prepare(
+      `INSERT INTO account_governance
+        (account_id,never_contact,manual_review_required,manual_review_approved_at,
+         vip,strategic_account,owner,notes,updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(account_id) DO UPDATE SET
+        never_contact=excluded.never_contact,
+        manual_review_required=excluded.manual_review_required,
+        manual_review_approved_at=excluded.manual_review_approved_at,
+        vip=excluded.vip,strategic_account=excluded.strategic_account,
+        owner=excluded.owner,notes=excluded.notes,updated_at=excluded.updated_at`,
+    ).bind(
+      accountId,
+      body.never_contact ? 1 : 0,
+      body.manual_review_required ? 1 : 0,
+      approvedAt,
+      body.vip ? 1 : 0,
+      body.strategic_account ? 1 : 0,
+      body.owner ? String(body.owner).slice(0,200) : null,
+      body.notes ? String(body.notes).slice(0,2000) : null,
+      nowIso(),
+    ).run()
+    return json({ ok: true, account_id: accountId, manual_review_approved_at: approvedAt })
+  }
+
+  if (path === "/admin/blackouts" && request.method === "GET") {
+    const rows = await env.GROWTH_DB.prepare(
+      "SELECT * FROM sending_blackouts WHERE date>=date('now') ORDER BY date,country_code LIMIT 500",
+    ).all()
+    return json(rows.results || [])
+  }
+
+  if (path === "/admin/blackouts" && request.method === "POST") {
+    const body = (await bodyJson(request)) as any
+    if (!body?.country_code || !body?.date || !body?.name) {
+      return json({ error: "country_code_date_name_required" }, 400)
+    }
+    try {
+      return json(await upsertSendingBlackout(env, {
+        country_code: String(body.country_code),
+        date: String(body.date),
+        name: String(body.name),
+      }))
+    } catch (error) {
+      return json({ error: error instanceof Error ? error.message : "invalid_blackout" }, 400)
+    }
+  }
+
+  if (path === "/admin/funnel" && request.method === "GET") {
+    return json(await funnelSnapshot(env))
+  }
+
+  if (path === "/admin/experiments" && request.method === "GET") {
+    return json(await experimentSnapshot(env))
+  }
+
+  if (path === "/admin/crm" && request.method === "GET") {
+    return json(await crmSnapshot(env))
+  }
+
   if (path === "/admin/operations" && request.method === "GET") {
     const alerts = await env.GROWTH_DB.prepare(
       "SELECT * FROM operations_alerts WHERE status='open' ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,last_seen_at DESC LIMIT 100",
@@ -215,6 +312,10 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       alerts: alerts.results || [],
       dead_letters: deadLetters.results || [],
       attribution: attribution.results || [],
+      heartbeats: await heartbeatHealth(env),
+      crm: await crmSnapshot(env),
+      experiments: await experimentSnapshot(env),
+      funnel: await funnelSnapshot(env),
     })
   }
 
@@ -244,6 +345,11 @@ async function handleAdmin(request: Request, env: Env, path: string) {
         handoff: Boolean(env.HANDOFF_TO || env.HANDOFF_WEBHOOK_URL),
         apollo_candidate_search: Boolean(env.APOLLO_API_KEY),
         quickemailverification: Boolean(env.QUICKEMAILVERIFICATION_API_KEY),
+        crm: Boolean(
+          env.CRM_WEBHOOK_URL ||
+          env.HUBSPOT_PRIVATE_APP_TOKEN ||
+          (env.SALESFORCE_INSTANCE_URL && env.SALESFORCE_ACCESS_TOKEN)
+        ),
       },
     })
   }
@@ -319,6 +425,7 @@ async function handleAdmin(request: Request, env: Env, path: string) {
       { kind: "authority" },
       { kind: "search_demand" },
       { kind: "learning" },
+      { kind: "crm_sync" },
       { kind: "maintenance" },
     ]
     await env.GROWTH_QUEUE.sendBatch(jobs.map((body) => ({ body })))
@@ -401,6 +508,20 @@ export default {
         mode: env.SEND_MODE || "dry_run",
         release_sha: env.RELEASE_SHA || null,
       })
+    }
+
+    if (url.pathname === "/events/crm" && request.method === "POST") {
+      const auth = request.headers.get("authorization") || ""
+      if (!env.CRM_WEBHOOK_SECRET || auth !== `Bearer ${env.CRM_WEBHOOK_SECRET}`) {
+        return unauthorized()
+      }
+      const body = await bodyJson(request)
+      if (!body) return json({ error: "invalid_json" }, 400)
+      try {
+        return json(await ingestCrmEvent(env, body))
+      } catch (error) {
+        return json({ error: error instanceof Error ? error.message : "crm_event_failed" }, 400)
+      }
     }
 
     if (url.pathname === "/dashboard/login" && request.method === "POST") {
@@ -584,22 +705,33 @@ export default {
       )
     }
 
-    if (url.pathname === "/unsubscribe" && request.method === "GET") {
+    if (url.pathname === "/unsubscribe" && (request.method === "GET" || request.method === "POST")) {
       const token = url.searchParams.get("token") || ""
       const email = await readUnsubscribeToken(token, env)
       if (!email) return new Response("Invalid or expired unsubscribe link.", { status: 400 })
       await env.GROWTH_DB.prepare(
-        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,'recipient_unsubscribe','link',?)",
+        "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,'recipient_unsubscribe',?,?)",
       )
-        .bind(email, nowIso())
+        .bind(email, request.method === "POST" ? "one_click" : "link", nowIso())
         .run()
       await env.GROWTH_DB.prepare(
         "UPDATE contacts SET status='suppressed', updated_at=? WHERE lower(email)=lower(?)",
       )
         .bind(nowIso(), email)
         .run()
+
+      if (request.method === "POST") {
+        return new Response("", {
+          status: 200,
+          headers: { "Cache-Control": "no-store" },
+        })
+      }
+
       return new Response("You have been unsubscribed from GIBP commercial outreach.", {
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
       })
     }
 
@@ -624,7 +756,9 @@ export default {
       { kind: "nurture" },
       { kind: "outreach" },
       { kind: "authority" },
+      { kind: "search_demand" },
       { kind: "learning" },
+      { kind: "crm_sync" },
       { kind: "maintenance" },
     ]
 
