@@ -1,4 +1,4 @@
-import type { Account, Contact, Conversation, Env, ReplyClassification } from "./types"
+import type { Account, Contact, Conversation, Env, GrowthJob, ReplyClassification } from "./types"
 import { discoverApolloContactCandidates, enrichTopApolloCandidate, runApolloEnrichmentCommissioningTest, runApolloEnrichmentCommissioningV2 } from "./apollo"
 import { aiJson, classifyReply } from "./ai"
 import { canSendTo } from "./compliance"
@@ -1491,6 +1491,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
            seniority_score=MAX(seniority_score,?),
            consent_status=CASE WHEN ?!='unknown' THEN ? ELSE consent_status END,
            lawful_basis=COALESCE(?,lawful_basis),
+           identity_verified_at=CASE WHEN ? IS NOT NULL THEN ? ELSE identity_verified_at END,
+           role_verified_at=CASE WHEN ? IS NOT NULL THEN ? ELSE role_verified_at END,
            updated_at=?
        WHERE id=?`,
     ).bind(
@@ -1505,6 +1507,10 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
       item.consent_status || "unknown",
       item.consent_status || "unknown",
       item.lawful_basis || null,
+      item.name || null,
+      now,
+      item.role || null,
+      now,
       now,
       existing.id,
     ).run()
@@ -1514,8 +1520,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
   await env.GROWTH_DB.prepare(
     `INSERT INTO contacts
       (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
-       consent_status,lawful_basis,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)`,
+       consent_status,lawful_basis,status,created_at,updated_at,identity_verified_at,role_verified_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)`,
   ).bind(
     item.id || id(),
     accountId,
@@ -1532,6 +1538,8 @@ async function upsertImportedContact(env: Env, accountId: string, item: any, fal
     item.lawful_basis || null,
     now,
     now,
+    item.name ? now : null,
+    item.role ? now : null,
   ).run()
 }
 
@@ -1551,7 +1559,7 @@ async function cleanup(env: Env) {
 
 export async function runQueueJob(
   env: Env,
-  kind: "directories" | "discovery" | "procurement" | "research" | "dossiers" | "contacts" | "apollo_candidates" | "apollo_enrich" | "apollo_enrich_commissioning" | "apollo_enrich_commissioning_v2" | "email_verify" | "email_verify_commissioning_v2" | "conversations" | "nurture" | "outreach" | "outreach_simulation_commissioning" | "authority" | "search_demand" | "learning" | "maintenance",
+  kind: GrowthJob["kind"],
 ) {
   const started = await recordJobStarted(env, kind)
   try {
