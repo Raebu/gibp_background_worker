@@ -20,6 +20,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           SERVICE_URL="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/gibp-background-worker"
+
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if curl --fail --silent --show-error \
               --connect-timeout 5 --max-time 12 \
@@ -72,6 +74,7 @@ jobs:
             echo "Cloudflare service probe $attempt/12 failed; retrying."
             sleep 8
           done
+
           echo "Cloudflare Worker service endpoint remained unavailable."
           exit 1
 
@@ -95,90 +98,16 @@ jobs:
             set -e
 
             cat /tmp/version-upload-attempt.log >> /tmp/version-upload.log
-            VERSION_ID="$(grep -Eo 'Worker Version ID:[[:space:]]*[a-fA-F0-9-]+' /tmp/version-upload-attempt.log | tail -1 | sed -E 's/.*Worker Version ID:[[:space:]]*//' || true)"
+
+            VERSION_ID="$(
+              grep -Eo '(Worker )?Version ID:[[:space:]]*[a-fA-F0-9-]+' /tmp/version-upload-attempt.log \
+                | tail -1 \
+                | sed -E 's/.*Version ID:[[:space:]]*//' \
+                || true
+            )"
+
             if [ "$UPLOAD_STATUS" -eq 0 ] && [ -n "$VERSION_ID" ]; then
-              echo "$VERSION_ID" | grep -Eq '^[a-fA-F0-9-]{32,40}
-      - name: Activate exact uploaded version at 100 percent
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$VERSION_ID"
-
-          DEPLOY_BODY="$(jq -cn \
-            --arg version "$VERSION_ID" \
-            --arg sha "$GITHUB_SHA" \
-            '{
-              strategy:"percentage",
-              versions:[{version_id:$version,percentage:100}],
-              annotations:{
-                "workers/message":("Exact GitHub rescue release " + $sha),
-                "workers/triggered_by":"github-actions-versioned-rescue"
-              }
-            }')"
-
-          DEPLOY_RESPONSE=""
-          for attempt in 1 2 3 4 5; do
-            if DEPLOY_RESPONSE="$(curl --fail --silent --show-error \
-              --connect-timeout 10 --max-time 30 \
-              --retry 1 --retry-delay 2 --retry-all-errors \
-              -X POST \
-              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              -H "Content-Type: application/json" \
-              --data "$DEPLOY_BODY" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/gibp-background-worker/deployments")"; then
-              break
-            fi
-            echo "Deployment activation attempt $attempt failed."
-            sleep $((attempt * 3))
-          done
-
-          echo "$DEPLOY_RESPONSE" | jq -e '.success == true' >/dev/null
-          echo "Activated Worker version $VERSION_ID at 100 percent."
-
-      - name: Prove exact production release SHA
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-            if curl --fail --silent --show-error \
-              --connect-timeout 8 --max-time 20 \
-              "https://growth.gibp.global/health" | tee /tmp/rescue-health.json; then
-              grep -q '"ok":true' /tmp/rescue-health.json
-              grep -q '"mode":"live"' /tmp/rescue-health.json
-              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/rescue-health.json
-              echo "Exact production SHA verified: $GITHUB_SHA"
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Production never proved the exact rescue release SHA."
-          exit 1
-
-      - name: Verify public commercial surfaces
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --connect-timeout 8 --max-time 20 \
-            "https://growth.gibp.global/assessment/payment-readiness" | tee /tmp/readiness.html
-          grep -q "Payment Infrastructure Readiness Score" /tmp/readiness.html
-
-          curl --fail --silent --show-error --connect-timeout 8 --max-time 20 \
-            "https://growth.gibp.global/insights" | tee /tmp/insights.html
-          grep -q "GIBP Market Briefings" /tmp/insights.html
-
-      - name: Confirm final controlled live configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-          node - <<'NODE'
-          const fs = require("fs")
-          const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (config.vars.SEND_MODE !== "live") throw new Error("SEND_MODE drift")
-          if (config.vars.RAMP_START_CAP !== "5") throw new Error("Ramp start drift")
-          if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment drift")
-          if (config.vars.RELEASE_SHA !== process.env.GITHUB_SHA) throw new Error("Release SHA stamp drift")
-          NODE
-
+              echo "$VERSION_ID" | grep -Eq '^[a-fA-F0-9-]{32,40}$'
               echo "VERSION_ID=$VERSION_ID" >> "$GITHUB_ENV"
               echo "Uploaded exact Worker version: $VERSION_ID"
               exit 0
@@ -233,6 +162,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if curl --fail --silent --show-error \
               --connect-timeout 8 --max-time 20 \
@@ -245,6 +175,7 @@ jobs:
             fi
             sleep 5
           done
+
           echo "Production never proved the exact rescue release SHA."
           exit 1
 
@@ -252,12 +183,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --fail --silent --show-error --connect-timeout 8 --max-time 20 \
-            "https://growth.gibp.global/assessment/payment-readiness" | tee /tmp/readiness.html
+
+          curl --fail --silent --show-error \
+            --connect-timeout 8 --max-time 20 \
+            "https://growth.gibp.global/assessment/payment-readiness" \
+            | tee /tmp/readiness.html
           grep -q "Payment Infrastructure Readiness Score" /tmp/readiness.html
 
-          curl --fail --silent --show-error --connect-timeout 8 --max-time 20 \
-            "https://growth.gibp.global/insights" | tee /tmp/insights.html
+          curl --fail --silent --show-error \
+            --connect-timeout 8 --max-time 20 \
+            "https://growth.gibp.global/insights" \
+            | tee /tmp/insights.html
           grep -q "GIBP Market Briefings" /tmp/insights.html
 
       - name: Confirm final controlled live configuration
