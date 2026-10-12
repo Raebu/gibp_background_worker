@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs"
+declare const require: (name: string) => { readFileSync(path: string, encoding: string): string }
+const fs = require("fs")
 import { describe, expect, it } from "vitest"
 import { apolloEnrichmentDailyCap, scoreApolloCandidateTitle } from "../src/apollo"
 
@@ -52,7 +53,7 @@ describe("Apollo paid-enrichment account cooldown", () => {
 
 describe("Apollo contact persistence", () => {
   it("does not rely on SQLite UPSERT conflict matching for lower(email)", () => {
-    const source = readFileSync("src/apollo.ts", "utf8")
+    const source = fs.readFileSync("src/apollo.ts", "utf8")
     expect(source).toContain("SELECT id FROM contacts WHERE lower(email)=lower(?) LIMIT 1")
     expect(source).toContain("UPDATE contacts")
     expect(source).toContain("INSERT INTO contacts")
