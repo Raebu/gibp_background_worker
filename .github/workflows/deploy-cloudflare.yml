@@ -1274,6 +1274,7 @@ jobs:
           " | tee /tmp/persistent-commissioning-proof.json
 
 
+      # Zero-credit proof: uses only existing compliance/QEV-eligible contacts and never calls Apollo enrichment.
       - name: Prove personalised outreach simulation without live sending
         shell: bash
         run: |
