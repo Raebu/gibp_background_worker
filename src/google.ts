@@ -1,6 +1,7 @@
 import type { Env } from "./types"
 import { audit, nowIso } from "./db"
 import { recordConversionAttribution } from "./operations"
+import { recordExperimentEvent } from "./experiments"
 
 type BusyWindow = { start: string; end: string }
 type MeetingSlot = { start: string; end: string; timezone: string; label: string }
@@ -443,6 +444,15 @@ export async function scheduleNativeGoogleMeeting(
     },
     occurredAt: selected.start,
   })
+
+  if (meeting.conversation_id) {
+    await recordExperimentEvent(
+      env,
+      meeting.conversation_id,
+      "meeting_booked",
+      `meeting:${meetingId}:booked`,
+    )
+  }
 
   await audit(env, "meeting", "google_calendar_scheduled", "meeting_request", meetingId, {
     account_name: meeting.account_name,
