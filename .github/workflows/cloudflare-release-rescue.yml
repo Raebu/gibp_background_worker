@@ -198,20 +198,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+          for attempt in $(seq 1 24); do
             if curl --fail --silent --show-error \
               --connect-timeout 8 --max-time 20 \
               "https://growth.gibp.global/health" | tee /tmp/rescue-health.json; then
-              grep -q '"ok":true' /tmp/rescue-health.json
-              grep -q '"mode":"live"' /tmp/rescue-health.json
-              grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/rescue-health.json
-              echo "Exact production SHA verified: $GITHUB_SHA"
-              exit 0
+              if grep -q '"ok":true' /tmp/rescue-health.json \
+                && grep -q '"mode":"live"' /tmp/rescue-health.json \
+                && grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/rescue-health.json; then
+                echo "Exact production SHA verified: $GITHUB_SHA"
+                exit 0
+              fi
+
+              echo "Health is live but still serving a different release on attempt $attempt/24:"
+              cat /tmp/rescue-health.json
+            else
+              echo "Health request failed on attempt $attempt/24."
             fi
+
             sleep 5
           done
 
           echo "Production never proved the exact rescue release SHA."
+          cat /tmp/rescue-health.json || true
           exit 1
 
       - name: Verify public commercial surfaces
