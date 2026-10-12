@@ -1169,34 +1169,51 @@ export async function crawlPublicContacts(
         if (score < 60) continue
 
         const now = nowIso()
-        await env.GROWTH_DB.prepare(
-          `INSERT INTO contacts
-            (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
-             seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
-           VALUES (?, ?, ?, ?, ?, 'official_named_public', ?, ?, 1, 1, ?, 'unknown',
-             'corporate_b2b_public_professional', 'active', ?, ?)
-           ON CONFLICT DO UPDATE SET
-             name=excluded.name,
-             role=excluded.role,
-             source_url=excluded.source_url,
-             is_public=1,
-             verified=1,
-             seniority_score=MAX(contacts.seniority_score, excluded.seniority_score),
-             updated_at=excluded.updated_at`,
-        )
-          .bind(
-            id(),
-            accountId,
+        const existing = await env.GROWTH_DB.prepare(
+          "SELECT id FROM contacts WHERE lower(email)=lower(?) LIMIT 1",
+        ).bind(contact.email).first<{ id: string }>()
+
+        if (existing?.id) {
+          await env.GROWTH_DB.prepare(
+            `UPDATE contacts
+             SET name=?,
+                 role=?,
+                 source_url=?,
+                 is_public=1,
+                 verified=1,
+                 seniority_score=MAX(seniority_score,?),
+                 updated_at=?
+             WHERE id=?`,
+          ).bind(
             contact.name,
             contact.role,
-            contact.email,
             response.url,
-            countryCode,
             score,
             now,
-            now,
+            existing.id,
+          ).run()
+        } else {
+          await env.GROWTH_DB.prepare(
+            `INSERT INTO contacts
+              (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,
+               seniority_score,consent_status,lawful_basis,status,created_at,updated_at)
+             VALUES (?, ?, ?, ?, ?, 'official_named_public', ?, ?, 1, 1, ?, 'unknown',
+               'corporate_b2b_public_professional', 'active', ?, ?)`,
           )
-          .run()
+            .bind(
+              id(),
+              accountId,
+              contact.name,
+              contact.role,
+              contact.email,
+              response.url,
+              countryCode,
+              score,
+              now,
+              now,
+            )
+            .run()
+        }
         stored += 1
       }
     } catch {}
