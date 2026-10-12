@@ -1,6 +1,7 @@
 import type { Env } from "./types"
 import { aiJson } from "./ai"
 import { audit, id, nowIso } from "./db"
+import { recordConversionAttribution } from "./operations"
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
@@ -32,12 +33,13 @@ export async function recordCommercialOutcome(env: Env, body: any) {
   if (!accountId) throw new Error("account_required")
 
   const occurredAt = body.occurred_at ? String(body.occurred_at).slice(0, 100) : nowIso()
+  const outcomeId = id()
   await env.GROWTH_DB.prepare(
     `INSERT INTO commercial_outcomes
      (id,conversation_id,account_id,outcome,value,currency,reason,occurred_at,created_at)
      VALUES (?,?,?,?,?,?,?,?,?)`,
   ).bind(
-    id(),
+    outcomeId,
     conversationId,
     accountId,
     outcome,
@@ -47,6 +49,18 @@ export async function recordCommercialOutcome(env: Env, body: any) {
     occurredAt,
     nowIso(),
   ).run()
+
+  await recordConversionAttribution(env, {
+    sourceKey: `commercial_outcome:${outcomeId}`,
+    conversationId,
+    accountId,
+    stage: outcome,
+    source: "commercial_outcome",
+    value: body.value == null ? null : Number(body.value),
+    currency: body.currency ? String(body.currency).slice(0, 10) : null,
+    metadata: { reason: body.reason || null },
+    occurredAt,
+  })
 
   await audit(env, "learning", "commercial_outcome", "account", accountId, {
     conversation_id: conversationId,
