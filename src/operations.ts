@@ -96,7 +96,7 @@ export async function markOutboundDispatchFailed(
   ).run()
 }
 
-function webhookEventKey(event: any) {
+export function webhookDedupeKey(event: any) {
   if (event?.id) return `event:${String(event.id)}`
   const type = String(event?.type || "")
   const data = event?.data || {}
@@ -108,7 +108,7 @@ function webhookEventKey(event: any) {
 }
 
 export async function claimWebhookEvent(env: Env, event: any) {
-  const key = webhookEventKey(event)
+  const key = webhookDedupeKey(event)
   if (!key) return { claimed: true, event_key: null }
 
   const data = event?.data || {}
@@ -317,6 +317,26 @@ export async function runDeliverabilityChecks(env: Env) {
   return { domain, checks }
 }
 
+export function reputationPauseReasons(
+  stats: {
+    sent: number
+    bounces: number
+    complaints: number
+    qevExceptions: number
+    deadLetters: number
+  },
+  dailyCap: number,
+) {
+  const bounceRate = stats.sent ? stats.bounces / stats.sent : 0
+  const reasons: string[] = []
+  if (stats.complaints >= 1) reasons.push("complaint_detected")
+  if (stats.sent >= 10 && stats.bounces >= 2 && bounceRate >= 0.05) reasons.push("bounce_rate_high")
+  if (stats.qevExceptions >= 5) reasons.push("qev_degraded")
+  if (stats.deadLetters >= 2) reasons.push("critical_queue_failures")
+  if (stats.sent > dailyCap) reasons.push("daily_cap_exceeded")
+  return { reasons, bounceRate }
+}
+
 export async function evaluateReputationAndSafety(env: Env) {
   const stats = await env.GROWTH_DB.prepare(
     `SELECT
@@ -341,15 +361,13 @@ export async function evaluateReputationAndSafety(env: Env) {
   const complaints = Number(stats?.complaints_24h || 0)
   const qevExceptions = Number(stats?.qev_exceptions_24h || 0)
   const deadLetters = Number(stats?.critical_dead_letters_24h || 0)
-  const bounceRate = sent ? bounces / sent : 0
   const dailyCap = Number(env.DAILY_SEND_CAP || 50)
-
-  const reasons: string[] = []
-  if (complaints >= 1) reasons.push("complaint_detected")
-  if (sent >= 10 && bounces >= 2 && bounceRate >= 0.05) reasons.push("bounce_rate_high")
-  if (qevExceptions >= 5) reasons.push("qev_degraded")
-  if (deadLetters >= 2) reasons.push("critical_queue_failures")
-  if (sent > dailyCap) reasons.push("daily_cap_exceeded")
+  const safety = reputationPauseReasons(
+    { sent, bounces, complaints, qevExceptions, deadLetters },
+    dailyCap,
+  )
+  const reasons = safety.reasons
+  const bounceRate = safety.bounceRate
 
   const state = await outboundPauseState(env)
   if (reasons.length && !state.paused) {
