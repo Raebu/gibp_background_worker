@@ -243,13 +243,19 @@ export async function requestMeetingBooking(
     }
   }
 
+  const recentSurface = await env.GROWTH_DB.prepare(
+    `SELECT source_site FROM website_intent
+     WHERE conversation_id=? AND source_site IN ('gibp.global','gibp.app')
+     ORDER BY created_at DESC LIMIT 1`,
+  ).bind(conversation.id).first<{ source_site: string }>()
+
   await env.GROWTH_DB.prepare(
     `INSERT INTO meeting_requests
-     (id,conversation_id,contact_id,account_id,status,booking_url,scheduled_at,provider_response_json,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+     (id,conversation_id,contact_id,account_id,status,booking_url,scheduled_at,provider_response_json,created_at,updated_at,source_site)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     requestId, conversation.id, contact.id, account.id, status, bookingUrl,
-    scheduledAt, JSON.stringify(providerResponse), now, now,
+    scheduledAt, JSON.stringify(providerResponse), now, now, recentSurface?.source_site || null,
   ).run()
 
   await audit(env, "meeting", "booking_requested", "conversation", conversation.id, {
