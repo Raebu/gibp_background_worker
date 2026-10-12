@@ -78,3 +78,18 @@ describe("production Apollo commissioning posture", () => {
     )
   })
 })
+
+
+describe("outreach simulation commissioning safety", () => {
+  it("has a dry-run-only commissioning job and never schedules it hourly", () => {
+    const engine = fs.readFileSync("src/engine.ts", "utf8")
+    const indexSource = fs.readFileSync("src/index.ts", "utf8")
+    expect(engine).toContain("processOutreachSimulationCommissioning")
+    expect(engine).toContain('if ((env.SEND_MODE || "dry_run") === "live")')
+    expect(engine).toContain('throw new Error("Commissioning simulation attempted a live send")')
+    expect(engine).toContain("timing_bypass_only: true")
+    const scheduledStart = indexSource.indexOf("async scheduled")
+    const queueStart = indexSource.indexOf("async queue", scheduledStart)
+    expect(indexSource.slice(scheduledStart, queueStart)).not.toContain("outreach_simulation_commissioning")
+  })
+})
