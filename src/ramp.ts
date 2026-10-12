@@ -19,7 +19,7 @@ export function computeNextRampCap(
   const ceiling = Math.max(floor, maximum)
   const cap = Math.max(floor, Math.min(ceiling, current))
 
-  if (stats.initialSent < 20) return cap
+  if (stats.initialSent < 50) return cap
 
   const bounceRate = stats.initialSent ? stats.bounces / stats.initialSent : 0
   const complaintRate = stats.initialSent ? stats.complaints / stats.initialSent : 0
