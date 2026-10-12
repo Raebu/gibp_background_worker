@@ -3,7 +3,7 @@ import { id, nowIso } from "./db"
 import { readIntentToken } from "./security"
 import { requestMeetingBooking } from "./lifecycle"
 import { readMeetingToken, scheduleNativeGoogleMeeting } from "./google"
-import { operationsSnapshot } from "./operations"
+import { operationsSnapshot, recordConversionAttribution } from "./operations"
 
 function esc(value: unknown) {
   return String(value ?? "")
@@ -176,14 +176,25 @@ export async function handleConversionRequest(request: Request, env: Env) {
 
   const score = conversionScores[kind]
   const now = nowIso()
+  const requestId = id()
   await env.GROWTH_DB.prepare(
     `INSERT INTO conversion_requests
      (id,account_id,contact_id,conversation_id,kind,status,score,payload_json,created_at,updated_at)
      VALUES (?,?,?,?,?,'new',?,'{}',?,?)`,
   ).bind(
-    id(), context.account.id, context.contact?.id || null, context.conversation.id,
+    requestId, context.account.id, context.contact?.id || null, context.conversation.id,
     kind, score, now, now,
   ).run()
+
+  await recordConversionAttribution(env, {
+    sourceKey: `conversion_request:${requestId}`,
+    conversationId: context.conversation.id,
+    accountId: context.account.id,
+    stage: kind === "meeting" ? "meeting_requested" : "conversion_request",
+    source: "private_briefing",
+    metadata: { kind, score },
+    occurredAt: now,
+  })
 
   await env.GROWTH_DB.prepare(
     "UPDATE conversations SET state='engaged',score=MIN(100,score+?),updated_at=? WHERE id=?",
