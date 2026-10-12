@@ -1158,12 +1158,14 @@ async function processResendEventCore(env: Env, event: any) {
   if (type === "suppression.added") {
     const suppressedEmail = String(data.email || data.recipient || "").trim().toLowerCase()
     if (suppressedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppressedEmail)) {
+      const providerReason = String(data.reason || "suppression.added")
+      const normalizedReason = /complain/i.test(providerReason) ? "email.complained" : providerReason
       await env.GROWTH_DB.prepare(
         "INSERT OR REPLACE INTO suppressions (email,reason,source,created_at) VALUES (?,?,?,?)",
       )
         .bind(
           suppressedEmail,
-          String(data.reason || "suppression.added"),
+          normalizedReason,
           "resend_webhook",
           nowIso(),
         )
@@ -1174,8 +1176,12 @@ async function processResendEventCore(env: Env, event: any) {
         .bind(nowIso(), suppressedEmail)
         .run()
       await audit(env, "compliance", "provider_suppression", "contact", suppressedEmail, {
-        reason: data.reason || null,
+        reason: providerReason,
+        normalized_reason: normalizedReason,
       })
+      if (normalizedReason === "email.complained") {
+        await evaluateReputationAndSafety(env)
+      }
       return { handled: true, suppression: true }
     }
   }
@@ -1228,6 +1234,10 @@ async function processResendEventCore(env: Env, event: any) {
     )
       .bind(nowIso(), conversation.id)
       .run()
+
+    if (type === "email.complained") {
+      await evaluateReputationAndSafety(env)
+    }
   }
   return { handled: true }
 }
