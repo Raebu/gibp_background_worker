@@ -1122,38 +1122,71 @@ export async function importData(env: Env, body: any) {
 
 async function upsertImportedContact(env: Env, accountId: string, item: any, fallbackCountry?: string) {
   const now = nowIso()
-  await env.GROWTH_DB.prepare(
-    `INSERT INTO contacts
-      (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
-       consent_status,lawful_basis,status,created_at,updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)
-     ON CONFLICT DO UPDATE SET
-       account_id=excluded.account_id, name=COALESCE(excluded.name,contacts.name),
-       role=COALESCE(excluded.role,contacts.role), source_url=COALESCE(excluded.source_url,contacts.source_url),
-       country_code=COALESCE(excluded.country_code,contacts.country_code),
-       is_public=MAX(contacts.is_public,excluded.is_public), verified=MAX(contacts.verified,excluded.verified),
-       seniority_score=MAX(contacts.seniority_score,excluded.seniority_score),
-       consent_status=CASE WHEN excluded.consent_status!='unknown' THEN excluded.consent_status ELSE contacts.consent_status END,
-       lawful_basis=COALESCE(excluded.lawful_basis,contacts.lawful_basis), updated_at=excluded.updated_at`,
-  )
-    .bind(
-      item.id || id(),
+  const email = String(item.email).toLowerCase()
+  const countryCode = item.country_code || fallbackCountry || null
+  const existing = await env.GROWTH_DB.prepare(
+    "SELECT id FROM contacts WHERE lower(email)=lower(?) LIMIT 1",
+  ).bind(email).first<{ id: string }>()
+
+  if (existing?.id) {
+    await env.GROWTH_DB.prepare(
+      `UPDATE contacts
+       SET account_id=?,
+           name=COALESCE(?,name),
+           role=COALESCE(?,role),
+           email=?,
+           email_source=?,
+           source_url=COALESCE(?,source_url),
+           country_code=COALESCE(?,country_code),
+           is_public=MAX(is_public,?),
+           verified=MAX(verified,?),
+           seniority_score=MAX(seniority_score,?),
+           consent_status=CASE WHEN ?!='unknown' THEN ? ELSE consent_status END,
+           lawful_basis=COALESCE(?,lawful_basis),
+           updated_at=?
+       WHERE id=?`,
+    ).bind(
       accountId,
       item.name || null,
       item.role || null,
-      String(item.email).toLowerCase(),
+      email,
       item.email_source || "import",
       item.source_url || null,
-      item.country_code || fallbackCountry || null,
+      countryCode,
       item.is_public ? 1 : 0,
       item.verified ? 1 : 0,
       Number(item.seniority_score || 50),
       item.consent_status || "unknown",
+      item.consent_status || "unknown",
       item.lawful_basis || null,
       now,
-      now,
-    )
-    .run()
+      existing.id,
+    ).run()
+    return
+  }
+
+  await env.GROWTH_DB.prepare(
+    `INSERT INTO contacts
+      (id,account_id,name,role,email,email_source,source_url,country_code,is_public,verified,seniority_score,
+       consent_status,lawful_basis,status,created_at,updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?)`,
+  ).bind(
+    item.id || id(),
+    accountId,
+    item.name || null,
+    item.role || null,
+    email,
+    item.email_source || "import",
+    item.source_url || null,
+    countryCode,
+    item.is_public ? 1 : 0,
+    item.verified ? 1 : 0,
+    Number(item.seniority_score || 50),
+    item.consent_status || "unknown",
+    item.lawful_basis || null,
+    now,
+    now,
+  ).run()
 }
 
 async function cleanup(env: Env) {
