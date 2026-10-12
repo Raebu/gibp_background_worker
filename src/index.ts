@@ -71,7 +71,15 @@ function websiteRateAllowed(request: Request) {
 }
 
 function websiteJson(data: unknown, status: number, origin: string | null) {
-  const response = json(data, status)
+  const response = status === 204
+    ? new Response(null, {
+        status,
+        headers: {
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        },
+      })
+    : json(data, status)
   if (origin) {
     response.headers.set("Access-Control-Allow-Origin", origin)
     response.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS")
