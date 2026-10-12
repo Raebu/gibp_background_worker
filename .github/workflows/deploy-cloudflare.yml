@@ -1200,7 +1200,7 @@ jobs:
             local kind="$1"
             local before after
             before="$(query_scalar "SELECT COUNT(*) AS total FROM audit_events WHERE category='engine' AND action='queue_job_complete' AND entity_id='$kind';")"
-            curl --fail --silent --show-error               -X POST               -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"               -H "Content-Type: application/json"               --data "{"body":{"kind":"$kind"}}"               "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/queues/$QUEUE_ID/messages"               > "/tmp/persistent-$kind-publish.json"
+              --data "$(jq -nc --arg kind "$kind" '{body:{kind:$kind}}')" \
             jq -e '.success == true' "/tmp/persistent-$kind-publish.json" >/dev/null
 
             for attempt in $(seq 1 24); do
