@@ -40,7 +40,7 @@
     "binding": "AI"
   },
   "vars": {
-    "SEND_MODE": "dry_run",
+    "SEND_MODE": "live",
     "FROM_EMAIL": "GIBP Commercial Desk <partnerships@gibp.global>",
     "OUTBOUND_FROM_EMAIL": "GIBP Commercial Desk <partnerships@gibp.global>",
     "TRANSACTIONAL_FROM_EMAIL": "GIBP <support@gibp.global>",
