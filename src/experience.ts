@@ -2,6 +2,7 @@ import type { Env } from "./types"
 import { id, nowIso } from "./db"
 import { readIntentToken } from "./security"
 import { requestMeetingBooking } from "./lifecycle"
+import { readMeetingToken, scheduleNativeGoogleMeeting } from "./google"
 
 function esc(value: unknown) {
   return String(value ?? "")
@@ -427,4 +428,97 @@ export async function renderDashboard(env: Env) {
      <section class="card"><h2>Non-email demand</h2>${(searchDemand.results||[]).map((x:any)=>`<div class="signal"><strong>${esc(x.query)}</strong><div>${esc(x.clicks)} clicks · ${esc(x.impressions)} impressions · avg position ${esc(x.average_position ?? "—")}</div><div class="muted">${esc(x.landing_path || "")}</div></div>`).join("") || "<p>No search-demand data has been ingested yet.</p>"}</section>`,
     { noindex:true },
   )
+}
+
+
+export async function renderMeetingBooking(request: Request, env: Env, meetingId: string) {
+  const url = new URL(request.url)
+  const token = url.searchParams.get("token") || ""
+  if (!(await readMeetingToken(env, token, meetingId))) {
+    return page(
+      "Meeting link unavailable — GIBP",
+      '<section class="card"><h2>Meeting link unavailable</h2><p>This booking link is invalid or has expired.</p></section>',
+      { noindex: true },
+    )
+  }
+
+  const meeting = await env.GROWTH_DB.prepare(
+    `SELECT mr.*,a.name AS account_name,ct.name AS contact_name,ct.role AS contact_role
+     FROM meeting_requests mr
+     JOIN accounts a ON a.id=mr.account_id
+     JOIN contacts ct ON ct.id=mr.contact_id
+     WHERE mr.id=?`,
+  ).bind(meetingId).first<any>()
+  if (!meeting) return new Response("Meeting request not found.", { status: 404 })
+
+  if (meeting.status === "scheduled") {
+    return page(
+      "Meeting scheduled — GIBP",
+      `<section class="hero"><div class="tag">Meeting scheduled</div><h1>You're booked.</h1>
+       <p>Your GIBP discussion with ${esc(meeting.account_name)} is scheduled for
+       <strong>${esc(meeting.scheduled_at || "")}</strong>.</p></section>`,
+      { noindex: true },
+    )
+  }
+
+  let provider: any = {}
+  try { provider = JSON.parse(meeting.provider_response_json || "{}") } catch {}
+  const slots = Array.isArray(provider.slots) ? provider.slots : []
+
+  const slotForms = slots.map((slot: any) =>
+    `<form method="post" action="/meeting/${encodeURIComponent(meetingId)}/select">
+      <input type="hidden" name="token" value="${esc(token)}">
+      <input type="hidden" name="slot_start" value="${esc(slot.start || "")}">
+      <button type="submit">${esc(slot.label || slot.start || "Choose this time")}</button>
+    </form>`
+  ).join("")
+
+  return page(
+    `Choose a GIBP meeting time — ${meeting.account_name}`,
+    `<div class="top"><div class="brand">GIBP</div><div class="tag">Meeting availability</div></div>
+     <section class="hero"><div class="tag">45-minute discussion</div><h1>Choose a time.</h1>
+       <p>Select one of the currently available times below. Availability is checked again before the event is created.</p>
+       ${(env.SEND_MODE || "dry_run") !== "live" ? '<p class="muted"><strong>Commissioning mode:</strong> calendar event creation is disabled until GIBP enables live commercial operation.</p>' : ""}
+     </section>
+     <section class="card"><div class="actions">${slotForms || "<p>No live slots are currently available. GIBP will follow up manually.</p>"}</div></section>`,
+    { noindex: true },
+  )
+}
+
+export async function handleMeetingBookingSelection(
+  request: Request,
+  env: Env,
+  meetingId: string,
+) {
+  const form = await request.formData()
+  const token = String(form.get("token") || "")
+  const slotStart = String(form.get("slot_start") || "")
+
+  try {
+    const result = await scheduleNativeGoogleMeeting(env, meetingId, token, slotStart)
+    return page(
+      "Meeting scheduled — GIBP",
+      `<div class="top"><div class="brand">GIBP</div><div class="tag">Meeting confirmed</div></div>
+       <section class="hero"><h1>You're booked.</h1>
+       <p>The calendar invitation has been created for <strong>${esc(result.scheduled_at || "")}</strong>.</p>
+       ${result.meet_url ? `<p><a class="btn" href="${esc(result.meet_url)}">Open Google Meet</a></p>` : ""}
+       <p class="muted">A calendar invitation is also sent to the attendee address.</p></section>`,
+      { noindex: true },
+    )
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "booking_failed"
+    const status = message === "calendar_booking_disabled_until_live_mode" ? 409 : 400
+    return new Response(
+      page(
+        "Meeting not scheduled — GIBP",
+        `<section class="card"><h2>Meeting not scheduled</h2><p>${esc(
+          message === "calendar_booking_disabled_until_live_mode"
+            ? "The booking workflow is commissioned but live event creation is intentionally disabled while GIBP remains in dry-run mode."
+            : "That slot could not be booked. It may no longer be available; please return to the booking page and choose another time.",
+        )}</p></section>`,
+        { noindex: true },
+      ).body,
+      { status, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
+    )
+  }
 }
