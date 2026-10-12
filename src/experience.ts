@@ -553,8 +553,10 @@ export async function renderDashboard(env: Env) {
      <section class="card"><h2>Shared GIBP surface intelligence</h2>
        <p>One commercial brain, with acquisition and product behaviour attributed separately across <strong>gibp.global</strong> and <strong>gibp.app</strong>.</p>
        <div class="grid">${surfaceCards}</div>
-       <h3 style="margin-top:22px">Customer lifecycle</h3>
-       ${surfaces.lifecycle.map((x:any)=>`<div class="signal"><strong>${esc(x.stage)} · ${esc(x.health_status)}</strong><div>${esc(x.total)} accounts</div></div>`).join("") || "<p>No product-linked lifecycle records yet.</p>"}
+       <h3 style="margin-top:22px">Institutional/customer lifecycle</h3>
+       ${surfaces.lifecycle.map((x:any)=>`<div class="signal"><strong>${esc(x.stage)} · ${esc(x.health_status)}</strong><div>${esc(x.total)} linked commercial accounts</div></div>`).join("") || "<p>No product-linked commercial accounts yet.</p>"}
+       <h3 style="margin-top:22px">gibp.app user lifecycle</h3>
+       ${surfaces.user_lifecycle.map((x:any)=>`<div class="signal"><strong>${esc(x.stage)} · ${esc(x.health_status)}</strong><div>${esc(x.total)} app users</div></div>`).join("") || "<p>No authenticated app-user lifecycle records yet.</p>"}
      </section>
      <section class="card"><h2>Commercial funnel</h2>
        <div class="grid">
