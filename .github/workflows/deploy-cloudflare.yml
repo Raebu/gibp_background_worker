@@ -323,7 +323,7 @@ jobs:
               --connect-timeout 8 --max-time 20 \
               "https://growth.gibp.global/health" -o /tmp/post-deploy-health.json \
               && jq -e --arg sha "$GITHUB_SHA" \
-                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                '.ok == true and .mode == "dry_run" and .release_sha == $sha' \
                 /tmp/post-deploy-health.json >/dev/null; then
               echo "Production already serves the exact SHA despite Wrangler status $DEPLOY_STATUS."
               DEPLOYED=true
@@ -372,12 +372,12 @@ jobs:
             if curl --fail --silent --show-error "$WORKER_URL/health" -o /tmp/health.json; then
               cat /tmp/health.json
               if jq -e --arg sha "$GITHUB_SHA" \
-                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                '.ok == true and .mode == "dry_run" and .release_sha == $sha' \
                 /tmp/health.json >/dev/null; then
                 exit 0
               fi
               OBSERVED_SHA="$(jq -r '.release_sha // "missing"' /tmp/health.json 2>/dev/null || echo invalid_json)"
-              echo "Health is live but still serving $OBSERVED_SHA ($attempt/20)."
+              echo "Health is in dry-run mode but still serving $OBSERVED_SHA ($attempt/20)."
             fi
             sleep 3
           done
@@ -391,7 +391,7 @@ jobs:
             if curl --fail --silent --show-error "https://growth.gibp.global/health" -o /tmp/branded-health.json; then
               cat /tmp/branded-health.json
               if jq -e --arg sha "$GITHUB_SHA" \
-                '.ok == true and .mode == "live" and .release_sha == $sha' \
+                '.ok == true and .mode == "dry_run" and .release_sha == $sha' \
                 /tmp/branded-health.json >/dev/null; then
                 exit 0
               fi
@@ -578,7 +578,7 @@ jobs:
           set -euo pipefail
           curl --fail --silent --show-error "$WORKER_URL/health" | tee /tmp/post-secret-health.json
           grep -q '"ok":true' /tmp/post-secret-health.json
-          grep -q '"mode":"live"' /tmp/post-secret-health.json
+          grep -q '"mode":"dry_run"' /tmp/post-secret-health.json
 
       - name: Verify signed Resend webhook path
         shell: bash

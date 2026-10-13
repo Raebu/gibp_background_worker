@@ -149,7 +149,7 @@ jobs:
             --connect-timeout 8 --max-time 20 \
             "https://growth.gibp.global/health" | tee /tmp/post-wrangler-health.json \
             && grep -q '"ok":true' /tmp/post-wrangler-health.json \
-            && grep -q '"mode":"live"' /tmp/post-wrangler-health.json \
+            && grep -q '"mode":"dry_run"' /tmp/post-wrangler-health.json \
             && grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/post-wrangler-health.json; then
             echo "Production already serves the exact GitHub SHA despite Wrangler's non-zero exit."
             exit 0
@@ -203,13 +203,13 @@ jobs:
               --connect-timeout 8 --max-time 20 \
               "https://growth.gibp.global/health" | tee /tmp/rescue-health.json; then
               if grep -q '"ok":true' /tmp/rescue-health.json \
-                && grep -q '"mode":"live"' /tmp/rescue-health.json \
+                && grep -q '"mode":"dry_run"' /tmp/rescue-health.json \
                 && grep -Fq "\"release_sha\":\"$GITHUB_SHA\"" /tmp/rescue-health.json; then
                 echo "Exact production SHA verified: $GITHUB_SHA"
                 exit 0
               fi
 
-              echo "Health is live but still serving a different release on attempt $attempt/24:"
+              echo "Health is in dry-run mode but still serving a different release on attempt $attempt/24:"
               cat /tmp/rescue-health.json
             else
               echo "Health request failed on attempt $attempt/24."
