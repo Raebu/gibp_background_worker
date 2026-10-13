@@ -39,7 +39,7 @@ jobs:
           node - <<'NODE'
           const fs = require("fs")
           const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (config.vars.SEND_MODE !== "live") throw new Error("Rescue release requires SEND_MODE=live")
+          if (config.vars.SEND_MODE !== "dry_run") throw new Error("Rescue release requires SEND_MODE=dry_run")
           if (config.vars.RAMP_START_CAP !== "5") throw new Error("Rescue release requires RAMP_START_CAP=5")
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment must remain disabled")
           if (config.vars.DAILY_NEW_OUTREACH_CAP !== "20") throw new Error("Unexpected daily new outreach ceiling")
@@ -246,7 +246,7 @@ jobs:
           node - <<'NODE'
           const fs = require("fs")
           const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (config.vars.SEND_MODE !== "live") throw new Error("SEND_MODE drift")
+          if (config.vars.SEND_MODE !== "dry_run") throw new Error("SEND_MODE drift")
           if (config.vars.RAMP_START_CAP !== "5") throw new Error("Ramp start drift")
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment drift")
           if (config.vars.RELEASE_SHA !== process.env.GITHUB_SHA) throw new Error("Release SHA stamp drift")

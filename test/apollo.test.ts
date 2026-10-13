@@ -70,7 +70,7 @@ describe("production Apollo safety posture", () => {
     const queueStart = indexSource.indexOf("async queue", scheduledStart)
     const scheduledSource = indexSource.slice(scheduledStart, queueStart)
 
-    expect(config.vars.SEND_MODE).toBe("live")
+    expect(config.vars.SEND_MODE).toBe("dry_run")
     expect(config.vars.RAMP_START_CAP).toBe("5")
     expect(config.vars.APOLLO_ENRICHMENT_DAILY_CAP).toBe("0")
     expect(scheduledSource).not.toContain('{ kind: "apollo_enrich" },')

@@ -152,14 +152,14 @@ jobs:
           done
           echo "Source-site attribution columns verified on all commercial event surfaces."
 
-      - name: Preflight controlled live ramp
+      - name: Preflight dry-run safety configuration
         shell: bash
         run: |
           set -euo pipefail
           node - <<'NODE'
           const fs = require("fs")
           const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (config.vars.SEND_MODE !== "live") throw new Error("Controlled rollout requires SEND_MODE=live")
+          if (config.vars.SEND_MODE !== "dry_run") throw new Error("Deployment requires SEND_MODE=dry_run")
           if (config.vars.RAMP_START_CAP !== "5") throw new Error("Controlled rollout requires RAMP_START_CAP=5")
           if (config.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment must remain disabled")
           const gscSites = String(config.vars.GSC_SITE_URLS || "")
@@ -543,15 +543,15 @@ jobs:
           jq -e '(.success == true or .success == "true") and (.safe_to_send == true or .safe_to_send == "true")' /tmp/qev-sandbox.json >/dev/null
           echo "QuickEmailVerification sandbox verification passed without consuming a production verification."
 
-      - name: Confirm controlled live ramp safety configuration
+      - name: Confirm dry-run safety configuration
         shell: bash
         run: |
           set -euo pipefail
           node - <<'NODE'
           const fs = require("fs")
           const config = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (config.vars.SEND_MODE !== "live") {
-            throw new Error("Controlled rollout requires SEND_MODE=live")
+          if (config.vars.SEND_MODE !== "dry_run") {
+            throw new Error("Deployment requires SEND_MODE=dry_run")
           }
           if (config.vars.RAMP_START_CAP !== "5") {
             throw new Error("RAMP_START_CAP must remain exactly 5 during controlled rollout")
@@ -1807,12 +1807,12 @@ jobs:
             LIMIT 40;
           " | tee /tmp/discovery-diagnostics.json
 
-      - name: Confirm controlled live deployment configuration
+      - name: Confirm dry-run deployment configuration
         run: |
           node - <<'NODE'
           const fs = require("fs")
           const c = JSON.parse(fs.readFileSync("wrangler.jsonc", "utf8"))
-          if (c.vars.SEND_MODE !== "live") throw new Error("SEND_MODE must remain live")
+          if (c.vars.SEND_MODE !== "dry_run") throw new Error("SEND_MODE must remain dry_run")
           if (c.vars.RAMP_START_CAP !== "5") throw new Error("RAMP_START_CAP must remain 5")
           if (c.vars.APOLLO_ENRICHMENT_DAILY_CAP !== "0") throw new Error("Paid Apollo enrichment must remain disabled")
           NODE
